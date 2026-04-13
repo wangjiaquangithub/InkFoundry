@@ -1,0 +1,8 @@
+pytest
+pytest-cov
+pydantic
+pyyaml
+mcp
+fastapi
+uvicorn
+httpx
