@@ -100,6 +100,17 @@ The system is divided into the **Engine Layer** (Common Code/Agent Logic) and th
 
 ---
 
+### **5. Advanced Logic: Memory & Conflict Resolution (v3.1 Patch)**
+*   **State-Over-Vector Filter (Hard Truth Filter)**: 
+    *   **Mechanism**: Before `MemoryBank` (RAG) injects context, it passes through a `State_Filter`.
+    *   **Logic**: If RAG recalls "Character A is alive" but `StateDB` says "Character A died at Ch50", the filter **blocks the RAG result**. `StateDB` is the single source of truth.
+*   **Gradient Rewrite Protocol (Smart Recovery)**:
+    *   **Retry 1 (Patch)**: Localized fix. Only rewrite the conflicting paragraph. Saves tokens.
+    *   **Retry 2 (Re-Context)**: Inject a precise `State_Snapshot` to force Writer to re-evaluate context.
+    *   **Retry 3 (Pivot Strategy)**: **Ultimate Fallback**. If logic is impossible (Deadlock), RedTeam proposes a **Plot Change** to Navigator (e.g., "Change mission: instead of winning the fight, protagonist retreats due to external factor"). **Kills infinite loops.**
+
+---
+
 ## 🚀 4. Execution Plan
 
 1.  **Phase 0 (MVP)**: Build `Engine` core structure, implement StateDB (MCP version) and Controller base logic.
