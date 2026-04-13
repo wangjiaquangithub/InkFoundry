@@ -1,120 +1,119 @@
-# InkFoundry Architecture v3.0 (AI Novel Factory)
+# InkFoundry Architecture v3.2 (Narrative OS Blueprint)
 
-> **Project Name**: InkFoundry  
-> **Design Goal**: To solve "logic collapse", "AI flavor", "context amnesia", and "system deadlock" in mass-producing long-form novels. Achieve **high-fidelity, fully automated, anti-decay** industrial content production.
+> **Project**: InkFoundry  
+> **Concept**: Narrative OS — A Dual-Layer System combining **Industrial Automation (Engine)** with **Visual Insight (Studio)**.  
+> **Goal**: Solve "logic collapse", "AI flavor", "context amnesia", and "system deadlock" in mass-producing long-form novels.
 
 ---
 
-## 🏗️ 1. Physical Directory Structure
+## 🏛️ 1. System Topology (Dual-Layer Architecture)
 
-The system is divided into the **Engine Layer** (Common Code/Agent Logic) and the **Instance Layer** (Specific Novel Data), supporting infinite expansion for new novels.
+The system is divided into the **Execution Engine** (Power) and the **Command Surface** (Vision).
 
 ```text
-/InkFoundry/
-├── 📂 Engine/                 # Core Engine
+InkFoundry /
+├── 📂 Engine/                 # [Layer 1: Execution Engine]
 │   ├── 📂 agents/             
-│   │   ├── writer.py          # Writer Agent (Multi-model routing, Voice Profile injection)
-│   │   ├── editor.py          # Editor Agent (Dual-blind review: Logic + Style)
-│   │   ├── redteam.py         # RedTeam Agent (Adversarial testing, Anti-cliché)
-│   │   └── navigator.py       # Navigator Agent (Pacing, Hooks, Tension Heatmap)
+│   │   ├── writer.py          # Writer Agent (Drafting, Style injection)
+│   │   ├── editor.py          # Editor Agent (Logic & Style Check)
+│   │   ├── redteam.py         # RedTeam Agent (Adversarial testing, Plot attack)
+│   │   └── navigator.py       # Navigator Agent (Pacing, Hooks, Task Cards)
+│   │   └── director.py        # Director Agent (Controls Role-Play Sandbox)
 │   ├── 📂 core/               
-│   │   ├── state_db.py        # StateDB Core (SQLite + MCP Server, Atomic locks/Snapshots)
-│   │   ├── memory_bank.py     # Vector Memory (RAG for long-context recall)
-│   │   └── controller.py      # Pipeline Controller (Watchdog, Circuit Breaker, Anti-deadlock)
-│   ├── 📂 templates/          # Genre Templates (Xuanhuan/Urban/Sci-Fi configs)
-│   └── 📂 utils/              # Utils (Anti-AI filters, Formatting checks)
+│   │   ├── state_db.py        # StateDB (SQLite + MCP Server, Atomic locks/Snapshots)
+│   │   ├── memory_bank.py     # Vector Memory (RAG + State_Filter)
+│   │   └── controller.py      # Pipeline Controller (Watchdog, Circuit Breaker)
+│   ├── 📂 templates/          # Genre Templates (Config & Prompts)
+│   └── 📂 utils/              # Anti-AI filters, Formatting checks
 │
-└── 📂 Projects/               # Project Instances
-    └── 📂 <Project_ID>/       # e.g., novel_001_longevity
-         ├── 📄 config.yaml          # Project Config (Model routing, Genre, Word count)
-         ├── 📂 01_State/            # Dynamic State Database (Single Source of Truth)
-         │    ├── 📄 state.db        # SQLite (Causality Graph, Row-level locks)
-         │    └── 📁 snapshots/      # State Snapshots (For crash rollback)
-         ├── 📂 02_Outlines/         # Navigation Output (Skeleton)
-         │    ├── 📄 volume_01.md    # Volume Macro-Outline
-         │    └── 📂 chapters/       # Chapter Task Cards (Micro-Outline)
-         ├── 📂 03_Archives/         # History Archives (Memory)
-         │    ├── 📄 summaries.json  # Chapter Summaries (Rolling context window)
-         │    └── 📁 vector_db/      # Vector Index (Semantic retrieval for long context)
-         └── 📂 04_Chapters/         # Chapter Output
-              ├── 📄 0001_draft.md  # Draft (From Writer)
-              ├── 📄 0001_review.md # Review Report (From Editor/RedTeam)
-              └── 📄 0001_final.md  # Final Version
+└── 📂 Studio/                 # [Layer 2: Command Surface / UI]
+    ├── 📂 dashboard/          # Visualizations (Tension Heatmap, Causality Graph)
+    ├── 📂 editor/             # Manual Intervention & Chapter Editing
+    └── 📂 sandbox/            # Role-Play Arena for Agents
 ```
 
 ---
 
 ## 🔄 2. Core Data Flow (Collaborative Network)
 
-不再是单向流水线，而是**“对抗 + 反馈 + 记忆”**的动态闭环。
+A dynamic loop of **Adversarial Generation + State Synchronization**.
 
 ```text
-[1. Navigation] Navigator generates Chapter_N Task Card (Defines Tension, Hooks, Clues)
+[1. Navigation] Navigator generates Chapter_N Task Card (Tension, Hooks, Clues)
    ↓
-[2. Recall] MemoryBank (RAG) recalls historical foreshadowing + StateDB reads current state
+[2. Recall] MemoryBank (RAG) -> passes through State_Filter -> injects Context
    ↓
-[3. Writing] WriterAgent combines Task Card + Memory + Voice Profile -> Generates Draft_v1
+[3. Writing] WriterAgent combines Task Card + Memory + Voice Profile -> Draft_v1
    ↓
-[4. Adversarial Review] EditorCritic + RedTeamAgent Joint Review
-   ├── 🔍 Logic Check: OOC, continuity breaks, logic gaps
-   ├── 🎨 Style Check: AI flavor, repetitive sentences, lack of sensory details
+[4. Adversarial Review] Editor + RedTeam Joint Review
+   ├── 🔍 Logic Check: OOC, continuity, logic gaps (StateDB vs RAG)
+   ├── 🎨 Style Check: AI flavor, sensory details, pacing
    └── ⚔️ RedTeam: Maliciously attacks plot rationality (Finding loopholes)
    ↓
-   ❌ If Score < 85 AND Retries < 3
-      ↩️ Return to Writer with Patch_Instructions -> Generate Draft_v2
+   ❌ If Score < 85 AND Retries < 3 -> [Gradient Rewrite Protocol] -> Draft_v2
    ↓
    ✅ If Pass OR Circuit Breaker Triggered (Retries == 3)
       ↓
-[5. Archiving] StateDB.update_state (Update characters, items, foreshadowing status with Atomic Lock)
+[5. Archiving] StateDB.update_state (Atomic Lock applied)
    ↓
-[6. Storage] Save Final.md -> Compress summary to Archives -> Trigger Next Chapter
+[6. Storage] Save Final.md -> Sync State to Studio -> Trigger Next Chapter
 ```
 
 ---
 
 ## 🛡️ 3. Key Mechanisms Design
 
-### **1. Anti-Deadlock & Circuit Breaker Protocol**
-*   **Max-Retry = 3**: If a chapter is rewritten more than 3 times, Pipeline forces intervention.
-*   **Graceful Degradation**: Controller lowers Editor strictness, allows "minor flaws" to save progress, logging issues to `known_issues.json` for future fixes.
-*   **Watchdog**: Hard timeout (e.g., 10 mins) per task. Timeout -> Kill -> Clean -> Retry/Downgrade.
+### **3.1 Anti-Deadlock & Circuit Breaker Protocol**
+*   **Max-Retry = 3**: If a chapter is rewritten > 3 times, Pipeline forces intervention.
+*   **Watchdog**: Hard timeout (e.g., 10 mins) per task. Timeout -> Kill -> Clean -> Downgrade/Retry.
+*   **Graceful Degradation**: Controller lowers Editor strictness on Retry 3 to save progress.
 
-### **2. StateDB Evolution: Causality & Atomicity**
-*   **MCP Tool Encapsulation**: Agents operate via standard interfaces (`read_state`, `update_state`, `rollback`), fully decoupled.
+### **3.2 StateDB Evolution: Causality & Atomicity**
+*   **MCP Tool Encapsulation**: Agents operate via standard interfaces (`read_state`, `update_state`, `rollback`).
 *   **Write Lock**: Prevents conflict when Writer and Editor compete for state updates.
-*   **Snapshot Rollback**: Auto-backup state after each chapter. If logic collapses at Chapter N, rollback to `Snapshot_N-1` instantly.
-*   **Causality Graph**: Tracks "Foreshadowing" vs "Payoff". E.g., `H01 (Jade Pendant) -> Impact (Ch50 Ancient Array)`.
+*   **Snapshot Rollback**: Auto-backup state after each chapter. Instant rollback to `Snapshot_N-1`.
 
-### **3. Hybrid Model Routing (Cost & Quality)**
-*   Defined dynamically in `config.yaml`:
-    *   **Writing (Daily)**: `Qwen-Plus` (Fast, Low Cost).
-    *   **Writing (Climax)**: `Claude-3.5-Sonnet` (Strong Logic, High Quality).
-    *   **Critic (Review)**: `DeepSeek-R1` (Strong Reasoning).
-
-### **4. Quality Control (QC)**
-*   **Character Voice Sandbox**: Maintains `voice_profiles.yaml` to enforce speaking styles (catchphrases, sentence length), preventing homogenization.
-*   **Tension Heatmap**: Navigator monitors `Tension_Level`. If 3 consecutive chapters score low, forces "High Conflict Task" in the next chapter.
-*   **Anti-AI Flavor Strategy**:
-    *   **Sensory Check**: Mandatory non-visual descriptions (Hearing/Smell/Touch) per chapter.
-    *   **Dynamic Forbidden List**: Auto-stats and bans AI buzzwords (e.g., "Unbelievable", "As if").
-
----
-
-### **5. Advanced Logic: Memory & Conflict Resolution (v3.1 Patch)**
+### **3.3 Advanced Logic: Memory & Conflict Resolution (v3.1 Patch)**
 *   **State-Over-Vector Filter (Hard Truth Filter)**: 
-    *   **Mechanism**: Before `MemoryBank` (RAG) injects context, it passes through a `State_Filter`.
-    *   **Logic**: If RAG recalls "Character A is alive" but `StateDB` says "Character A died at Ch50", the filter **blocks the RAG result**. `StateDB` is the single source of truth.
+    *   **Mechanism**: RAG results pass through a `State_Filter` before injection.
+    *   **Logic**: If RAG recalls "Character A is alive" but `StateDB` says "Character A died", the filter **blocks the RAG result**. StateDB is the single source of truth.
 *   **Gradient Rewrite Protocol (Smart Recovery)**:
-    *   **Retry 1 (Patch)**: Localized fix. Only rewrite the conflicting paragraph. Saves tokens.
-    *   **Retry 2 (Re-Context)**: Inject a precise `State_Snapshot` to force Writer to re-evaluate context.
-    *   **Retry 3 (Pivot Strategy)**: **Ultimate Fallback**. If logic is impossible (Deadlock), RedTeam proposes a **Plot Change** to Navigator (e.g., "Change mission: instead of winning the fight, protagonist retreats due to external factor"). **Kills infinite loops.**
+    *   **Retry 1 (Patch)**: Localized fix. Only rewrite the conflicting paragraph.
+    *   **Retry 2 (Re-Context)**: Inject precise `State_Snapshot` to force re-evaluation.
+    *   **Retry 3 (Pivot Strategy)**: **Ultimate Fallback**. RedTeam proposes a **Plot Change** (e.g., "Change mission: retreat instead of fight"). Kills infinite loops.
 
 ---
 
-## 🚀 4. Execution Plan
+## ⚙️ 4. Operational Flexibility (User Control)
 
-1.  **Phase 0 (MVP)**: Build `Engine` core structure, implement StateDB (MCP version) and Controller base logic.
-2.  **Phase 1**: Run Writer -> Editor feedback loop, initialize first project.
-3.  **Phase 2**: Introduce RedTeam and MemoryBank (RAG) for long-context logic.
+### **4.1 Review Policy Matrix (Human-in-the-Loop)**
+*   **Strict Mode**: User approves every chapter. (High Quality Control)
+*   **Milestone Mode**: AI runs autonomously. Interrupts only on **Logic Branches** or **RedTeam Critical Alerts**. (Balanced)
+*   **Headless Mode**: Fire-and-forget automation. (Speed)
 
-**Architecture locked. Ready for code implementation.**
+### **4.2 Hierarchical Model Routing**
+*   **L1 Global Default**: Base model for the whole project (e.g., `Qwen-Plus`).
+*   **L2 Agent Override**: Assign specific models to Agents (e.g., Editor uses `Claude` for reasoning).
+*   **L3 Task Override**: Temporary upgrade for specific tasks (e.g., Climax chapters use `Opus`).
+
+---
+
+## 🎭 5. Creative Sandbox (Agent Symbiosis)
+
+### **5.1 Director_Agent (The Brain)**
+*   **Role**: Controls the Role-Play Sandbox to prevent infinite loops or "happy talk".
+*   **Mechanism**: 
+    *   Injects **Event Pressure** (e.g., "Police sirens heard outside") to force character decisions.
+    *   Enforces character consistency.
+*   **Output**: Generates a `Decision_Log` (e.g., "Protagonist decides to sacrifice Item A"), which Navigator converts into the next `Task_Card`.
+
+---
+
+## 🚀 6. Execution Plan
+
+1.  **Phase 0 (MVP)**: Build `Engine` core structure, implement StateDB (MCP) and Controller base logic.
+2.  **Phase 1**: Run Writer -> Editor feedback loop, initialize first project (InkFoundry Core).
+3.  **Phase 2**: Introduce RedTeam, MemoryBank (RAG), and Sandbox features.
+4.  **Phase 3**: Connect Studio Interface (Visualization & Manual Intervention).
+
+**Architecture locked. Ready for implementation.**
