@@ -1,10 +1,13 @@
 """Studio FastAPI backend - REST API for the UI dashboard."""
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from Engine.core.state_db import StateDB
@@ -57,6 +60,24 @@ def create_app() -> FastAPI:
         if char is None:
             return {"error": f"Character '{name}' not found"}
         return char.model_dump()
+
+    # --- Static file serving for React SPA ---
+    FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+
+    if os.path.exists(FRONTEND_DIST):
+        app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str) -> Any:
+        """Serve React SPA - fallback to index.html for all non-API routes."""
+        if full_path.startswith(("api/", "health", "docs", "openapi.json", "status", "characters")):
+            return None  # Let other routes handle API paths
+        if not os.path.exists(FRONTEND_DIST):
+            return {"status": "API running", "message": "Frontend not built yet. Run: cd frontend && npm run build"}
+        index_path = os.path.join(FRONTEND_DIST, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+        return {"status": "API running", "message": "Frontend not built yet. Run: cd frontend && npm run build"}
 
     return app
 
