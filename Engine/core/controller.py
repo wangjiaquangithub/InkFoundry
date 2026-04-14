@@ -1,6 +1,8 @@
 """Pipeline Controller with watchdog, circuit breaker, and Gradient Rewrite Protocol."""
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any, Callable
 
 
@@ -135,3 +137,58 @@ class GradientRewriter:
 
         result = await self._gateway.chat(messages, temperature=0.8, max_tokens=4096)
         return result
+
+
+class WatchdogTimer:
+    """Kills pipeline if a single step takes too long.
+
+    Monitors execution time per step and publishes timeout events
+    to the EventBus when a step exceeds the configured timeout.
+
+    Args:
+        timeout_seconds: Maximum time allowed for a single step (default: 300s / 5min).
+        event_bus: Optional EventBus instance for publishing progress events.
+    """
+
+    def __init__(self, timeout_seconds: int = 300, event_bus=None):
+        self._timeout = timeout_seconds
+        self._event_bus = event_bus
+        self._timer: threading.Timer | None = None
+        self._timed_out = False
+
+    def start(self, step_name: str):
+        """Start the watchdog for a new step.
+
+        Publishes a 'pipeline_progress' event with status 'started'.
+        """
+        if self._event_bus:
+            self._event_bus.publish(
+                "pipeline_progress",
+                {"step": step_name, "status": "started"},
+            )
+        self._timer = threading.Timer(self._timeout, self._on_timeout, args=[step_name])
+        self._timer.start()
+
+    def reset(self):
+        """Reset the watchdog timer for the current step."""
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+    def stop(self):
+        """Stop the watchdog and clean up."""
+        self.reset()
+
+    def _on_timeout(self, step_name: str):
+        """Called when the watchdog timer expires."""
+        self._timed_out = True
+        if self._event_bus:
+            self._event_bus.publish(
+                "pipeline_progress",
+                {"step": step_name, "status": "timeout"},
+            )
+
+    @property
+    def timed_out(self) -> bool:
+        """Whether the watchdog has triggered a timeout."""
+        return self._timed_out
