@@ -170,6 +170,141 @@ InkFoundry/
 
 See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the full development guide.
 
+---
+
+## 项目简介
+
+**InkFoundry**（中文代号：**叙事引擎**）是一个面向 AI 辅助长篇小说创作的「叙事操作系统」。
+
+### 核心问题
+
+大语言模型批量生成长篇小说时存在四个根本性缺陷：
+
+| 问题 | 症状 |
+|------|------|
+| **逻辑崩溃** | 角色行为前后矛盾，剧情出现漏洞 |
+| **AI 腔调** | 所有角色说话一个味儿，文风同质化 |
+| **上下文失忆** | RAG 检索结果与已建立的故事事实矛盾 |
+| **系统死锁** | 无限重试循环，无退出机制 |
+
+### 解决方案
+
+InkFoundry 通过**工业自动化原理**解决这些问题：
+
+```
+导航器 ──> 写手 ──> 编辑 ──> 红队
+  ^                            |
+  |       ┌─ 状态数据库 ──┐     |
+  └───────│ 状态 > 向量    │<────┘
+          │ 过滤器        │
+          └───────────────┘
+```
+
+**状态数据库（StateDB）** 是系统的唯一真相源。如果 StateDB 记录「角色已死亡」，无论 RAG 向量检索返回什么结果，都不会让这个角色复活。
+
+### 架构分层
+
+| 层级 | 组件 | 说明 |
+|------|------|------|
+| **Layer 1：引擎** | StateDB、StateFilter、Controller、WriterAgent、EditorAgent 等 27 个组件 | 核心执行引擎 |
+| **Layer 2：工作室** | FastAPI REST + WebSocket、MCP Server、React Dashboard | 命令操作面 |
+
+### 关键机制
+
+- **状态优先过滤（State-Over-Vector）**：StateDB 的硬事实永远优先于 RAG 检索结果
+- **管道控制器（Pipeline Controller）**：重试 3 次 → 熔断器 → 优雅降级，保存进度不丢失
+- **分层模型路由**：全局默认 → 角色专用 → 任务覆盖三级模型选择
+- **角色声音沙箱**：通过 YAML 配置文件为每个角色注入独特声音特征，避免 AI 腔
+
+---
+
+## 部署指南
+
+### 环境要求
+
+| 依赖 | 最低版本 |
+|------|----------|
+| Python | 3.10+ |
+| 操作系统 | Linux / macOS / Windows |
+| LLM API | 兼容 OpenAI 接口的任意服务（通义千问、OpenAI、本地部署等） |
+
+### 本地开发部署
+
+```bash
+# 1. 克隆仓库
+git clone <仓库地址> && cd InkFoundry
+
+# 2. 创建虚拟环境
+python -m venv .venv && source .venv/bin/activate
+
+# 3. 安装依赖
+pip install -r requirements.txt
+
+# 4. 配置环境变量
+cp .env.example .env
+# 编辑 .env 文件，填入你的 API Key 和模型配置
+
+# 5. 运行测试
+pytest
+
+# 6. 启动 Studio API
+uvicorn Studio.api:app --reload
+# 访问 http://localhost:8000
+```
+
+### 生产部署
+
+```bash
+# 1. 创建虚拟环境
+python -m venv /opt/inkfoundry/venv
+source /opt/inkfoundry/venv/bin/activate
+
+# 2. 安装依赖
+pip install --no-cache-dir -r requirements.txt
+
+# 3. 配置环境变量（建议使用 .env.production）
+cat > /opt/inkfoundry/.env << 'ENV'
+LLM_API_KEY=你的正式API密钥
+LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
+DEFAULT_MODEL=qwen3.6-plus
+ENV
+
+# 4. 使用 Gunicorn + Uvicorn 启动
+gunicorn Studio.api:app \
+  --bind 0.0.0.0:8000 \
+  --workers 4 \
+  --worker-class uvicorn.workers.UvicornWorker \
+  --access-logfile - \
+  --error-logfile -
+```
+
+### Docker 部署（规划中）
+
+```dockerfile
+# Dockerfile 规划
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8000
+CMD ["gunicorn", "Studio.api:app", "--bind", "0.0.0.0:8000"]
+```
+
+### 环境变量说明
+
+| 变量名 | 必需 | 说明 |
+|--------|------|------|
+| `LLM_API_KEY` | 是 | LLM API 密钥 |
+| `LLM_BASE_URL` | 否 | API 端点地址，默认 `https://coding.dashscope.aliyuncs.com/v1` |
+| `DEFAULT_MODEL` | 否 | 全局默认模型 |
+| `WRITER_MODEL` | 否 | 写手专用模型 |
+| `EDITOR_MODEL` | 否 | 编辑专用模型 |
+| `REDTEAM_MODEL` | 否 | 红队专用模型 |
+| `NAVIGATOR_MODEL` | 否 | 导航器专用模型 |
+
+缺少 `LLM_API_KEY` 时，`EngineConfig.from_env()` 会抛出 `ValueError`。
+
 ## License
 
 MIT
