@@ -2,3 +2,7 @@ style: "default"
 tone: "neutral"
 pacing: "moderate"
 vocabulary: "standard"
+speech_patterns: []
+vocabulary_list: []
+sensory_bias: {}
+forbidden_words: []

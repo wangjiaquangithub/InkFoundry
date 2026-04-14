@@ -23,9 +23,33 @@ class VoiceSandbox:
         Returns:
             Prompt with voice constraints appended.
         """
-        return f"""{system_prompt}
-### Voice Constraints
-- Style: {self.config.get('style', 'default')}
-- Tone: {self.config.get('tone', 'neutral')}
-- Pacing: {self.config.get('pacing', 'moderate')}
-"""
+        parts = [system_prompt]
+
+        style = self.config.get("style", "default")
+        tone = self.config.get("tone", "neutral")
+        pacing = self.config.get("pacing", "moderate")
+
+        parts.append("角色声音配置:")
+        parts.append(f"  风格: {style}")
+        parts.append(f"  语调: {tone}")
+        parts.append(f"  节奏: {pacing}")
+
+        speech_patterns = self.config.get("speech_patterns", [])
+        if speech_patterns:
+            parts.append(f"  说话习惯: {', '.join(speech_patterns)}")
+
+        vocabulary = self.config.get("vocabulary_list", [])
+        if vocabulary:
+            parts.append(f"  专属词汇: {', '.join(vocabulary)}")
+
+        sensory_bias = self.config.get("sensory_bias", {})
+        if sensory_bias:
+            parts.append(
+                f"  感官偏好: {', '.join(f'{k}: {v}' for k, v in sensory_bias.items())}"
+            )
+
+        forbidden = self.config.get("forbidden_words", [])
+        if forbidden:
+            parts.append(f"  禁止使用: {', '.join(forbidden)}")
+
+        return "\n".join(parts)
