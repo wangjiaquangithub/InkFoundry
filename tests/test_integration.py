@@ -4,6 +4,7 @@ from Engine.core.state_db import StateDB
 from Engine.core.models import CharacterState, WorldState, StateSnapshot
 from Engine.core.filter import StateFilter
 from Engine.core.controller import PipelineController, CircuitBreakerError
+from Engine.config import EngineConfig
 from Engine.agents.base import BaseAgent
 from Engine.agents.writer import WriterAgent
 from Engine.agents.editor import EditorAgent
@@ -104,13 +105,35 @@ def test_model_router_integration():
     """Test model router with pipeline configuration."""
     config = {
         "default_model": "qwen-plus",
-        "climax_model": "claude-opus",
+        "api_key": "test-key",
+        "base_url": "https://example.com/v1",
     }
     router = ModelRouter(config)
 
-    # Writer gets default model
-    assert router.get_model("writer") == "qwen-plus"
-    # Writer with high importance gets climax model
-    assert router.get_model("writer", importance="high") == "claude-opus"
-    # Editor always gets default
-    assert router.get_model("editor", importance="high") == "qwen-plus"
+    result = router.get_model("writer")
+    assert result["model"] == "qwen-plus"
+    assert result["api_key"] == "test-key"
+
+    result = router.get_model("editor", importance="high")
+    assert result["model"] == "qwen-plus"
+    assert result["api_key"] == "test-key"
+
+
+def test_config_router_agent_flow(monkeypatch):
+    """Test full flow: EngineConfig -> ModelRouter -> BaseAgent."""
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setenv("DEFAULT_MODEL", "qwen-turbo")
+    monkeypatch.setenv("WRITER_MODEL", "qwen-plus")
+
+    config = EngineConfig.from_env()
+    router = ModelRouter(config.to_router_config())
+
+    info = router.get_model("writer", importance="high")
+    assert info["model"] == "qwen-plus"
+    assert info["api_key"] == "test-key"
+
+    agent = BaseAgent.from_router_info(info, system_prompt="Write.")
+    assert agent.model == "qwen-plus"
+    assert agent.api_key == "test-key"
+    assert agent.base_url == "https://example.com/v1"
