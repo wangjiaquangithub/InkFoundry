@@ -138,6 +138,20 @@ class StateDB:
             return CharacterState.model_validate_json(row[0])
         return None
 
+    def delete_character(self, name: str) -> bool:
+        """Delete a character state by name.
+
+        Returns:
+            True if the character was deleted, False if not found.
+        """
+        self._ensure_open()
+        with self.lock:
+            with self.conn:
+                cursor = self.conn.execute(
+                    "DELETE FROM characters WHERE name = ?", (name,)
+                )
+                return cursor.rowcount > 0
+
     # --- World State CRUD ---
 
     def update_world_state(self, world: WorldState) -> None:
