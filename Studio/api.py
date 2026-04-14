@@ -1,6 +1,7 @@
 """Studio FastAPI backend - REST API for the UI dashboard."""
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
@@ -61,14 +62,11 @@ def create_app() -> FastAPI:
             return {"error": f"Character '{name}' not found"}
         return char.model_dump()
 
-import asyncio
-
     @app.websocket("/ws/pipeline")
     async def websocket_pipeline(websocket: WebSocket):
         await websocket.accept()
         try:
             while True:
-                # Send heartbeat/status updates
                 await asyncio.sleep(5)
                 await websocket.send_json({
                     "step": "idle",
