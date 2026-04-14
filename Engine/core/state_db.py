@@ -208,6 +208,12 @@ class StateDB:
 
     # --- Lifecycle ---
 
+    def __enter__(self) -> "StateDB":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
     def close(self) -> None:
         """Close the database connection."""
         if self.conn:

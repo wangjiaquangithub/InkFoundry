@@ -8,7 +8,9 @@ from Engine.core.filter import StateFilter
 def db(tmp_path):
     """Create a StateDB instance with a temporary SQLite file."""
     db_path = tmp_path / "test_state.db"
-    return StateDB(str(db_path))
+    db = StateDB(str(db_path))
+    yield db
+    db.close()
 
 
 def test_init_creates_tables(db):

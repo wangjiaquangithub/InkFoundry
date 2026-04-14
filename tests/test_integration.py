@@ -66,12 +66,12 @@ def test_full_pipeline_mock():
     assert "attack" in attack
 
     # 5. StateDB updates character state
-    db = StateDB(":memory:")
-    char = CharacterState(name="Hero", role="Protagonist")
-    db.update_character(char)
-    retrieved = db.get_character("Hero")
-    assert retrieved is not None
-    assert retrieved.name == "Hero"
+    with StateDB(":memory:") as db:
+        char = CharacterState(name="Hero", role="Protagonist")
+        db.update_character(char)
+        retrieved = db.get_character("Hero")
+        assert retrieved is not None
+        assert retrieved.name == "Hero"
 
     # 6. MemoryBank stores summary
     bank = MemoryBank(collection_name=f"test_integration_{uuid.uuid4().hex[:8]}")
@@ -88,34 +88,34 @@ def test_full_pipeline_mock():
 
 def test_pipeline_with_circuit_breaker():
     """Test that circuit breaker correctly handles persistent failures."""
-    db = StateDB(":memory:")
-    ctrl = PipelineController(max_retries=2)
+    with StateDB(":memory:") as db:
+        ctrl = PipelineController(max_retries=2)
 
-    def failing_write():
-        raise RuntimeError("Write failed")
+        def failing_write():
+            raise RuntimeError("Write failed")
 
-    with pytest.raises(CircuitBreakerError):
-        ctrl.execute_with_retry(failing_write)
+        with pytest.raises(CircuitBreakerError):
+            ctrl.execute_with_retry(failing_write)
 
-    # StateDB should still be functional after circuit breaker trip
-    db.update_character(CharacterState(name="Survivor", role="Support"))
-    assert db.get_character("Survivor") is not None
+        # StateDB should still be functional after circuit breaker trip
+        db.update_character(CharacterState(name="Survivor", role="Support"))
+        assert db.get_character("Survivor") is not None
 
 
 def test_state_filter_blocks_deceased():
     """Test that StateFilter blocks context for deceased characters."""
-    db = StateDB(":memory:")
-    db.update_character(CharacterState(name="DeadGuy", role="Villain", status="deceased"))
-    db.update_character(CharacterState(name="AliveGuy", role="Hero", status="active"))
+    with StateDB(":memory:") as db:
+        db.update_character(CharacterState(name="DeadGuy", role="Villain", status="deceased"))
+        db.update_character(CharacterState(name="AliveGuy", role="Hero", status="active"))
 
-    f = StateFilter(db)
-    rag_context = {
-        "DeadGuy": "DeadGuy is walking towards you.",
-        "AliveGuy": "AliveGuy stands ready.",
-    }
-    result = f.apply(rag_context)
-    assert "DeadGuy" not in result
-    assert "AliveGuy" in result
+        f = StateFilter(db)
+        rag_context = {
+            "DeadGuy": "DeadGuy is walking towards you.",
+            "AliveGuy": "AliveGuy stands ready.",
+        }
+        result = f.apply(rag_context)
+        assert "DeadGuy" not in result
+        assert "AliveGuy" in result
 
 
 def test_model_router_integration():
@@ -239,44 +239,44 @@ def test_daemon_scheduler_with_state_transitions():
     3. On-complete callback records token usage
     4. Scheduler processes queue and stops cleanly
     """
-    db = StateDB(":memory:")
-    tracker = TokenTracker()
+    with StateDB(":memory:") as db:
+        tracker = TokenTracker()
 
-    # Set up initial character state
-    db.update_character(CharacterState(name="Protagonist", role="Hero"))
+        # Set up initial character state
+        db.update_character(CharacterState(name="Protagonist", role="Hero"))
 
-    scheduler = DaemonScheduler()
-    completed_tasks = []
+        scheduler = DaemonScheduler()
+        completed_tasks = []
 
-    def on_task_complete(task):
-        completed_tasks.append(task)
-        # Record token usage for this task
-        tracker.record(
-            model="qwen-plus",
-            prompt_tokens=1000,
-            completion_tokens=500,
-            task=task.get("name", "unknown"),
-        )
+        def on_task_complete(task):
+            completed_tasks.append(task)
+            # Record token usage for this task
+            tracker.record(
+                model="qwen-plus",
+                prompt_tokens=1000,
+                completion_tokens=500,
+                task=task.get("name", "unknown"),
+            )
 
-    scheduler.on_complete(on_task_complete)
+        scheduler.on_complete(on_task_complete)
 
-    # Add tasks to the queue
-    scheduler.add_task({"name": "chapter_1", "chapter": 1})
-    scheduler.add_task({"name": "chapter_2", "chapter": 2})
-    assert scheduler.queue_size == 2
+        # Add tasks to the queue
+        scheduler.add_task({"name": "chapter_1", "chapter": 1})
+        scheduler.add_task({"name": "chapter_2", "chapter": 2})
+        assert scheduler.queue_size == 2
 
-    # Start and let it process briefly
-    scheduler.start()
+        # Start and let it process briefly
+        scheduler.start()
 
-    # Import time for polling
-    import time
-    time.sleep(0.5)
+        # Import time for polling
+        import time
+        time.sleep(0.5)
 
-    # Verify tasks were processed
-    scheduler.stop()
-    assert len(completed_tasks) >= 1
-    assert tracker.stats.total_requests >= 1
-    assert tracker.stats.total_tokens > 0
+        # Verify tasks were processed
+        scheduler.stop()
+        assert len(completed_tasks) >= 1
+        assert tracker.stats.total_requests >= 1
+        assert tracker.stats.total_tokens > 0
 
 
 def test_full_chapter_lifecycle():
@@ -333,45 +333,45 @@ def test_full_chapter_lifecycle():
     assert "attack" in attack
 
     # 5-6. StateDB + MemoryBank
-    db = StateDB(":memory:")
-    char = CharacterState(
-        name="Elena",
-        role="Protagonist",
-        status="active",
-        relationships={"ally": "Marcus"},
-    )
-    db.update_character(char)
+    with StateDB(":memory:") as db:
+        char = CharacterState(
+            name="Elena",
+            role="Protagonist",
+            status="active",
+            relationships={"ally": "Marcus"},
+        )
+        db.update_character(char)
 
-    bank = MemoryBank(collection_name=f"lifecycle_test_{uuid.uuid4().hex[:8]}")
-    bank.add_summary(1, "Elena meets Marcus in the tavern.")
+        bank = MemoryBank(collection_name=f"lifecycle_test_{uuid.uuid4().hex[:8]}")
+        bank.add_summary(1, "Elena meets Marcus in the tavern.")
 
-    # 7. StateFilter validates
-    sf = StateFilter(db)
-    rag = {"Elena": "Elena walks.", "Ghost": "Ghost appears."}
-    filtered = sf.apply(rag)
-    assert "Elena" in filtered
-    # Note: StateFilter only blocks characters IN StateDB that are deceased/inactive.
-    # Characters not in StateDB pass through (no contradiction to filter).
-    assert "Ghost" in filtered  # Not in StateDB, so not blocked
+        # 7. StateFilter validates
+        sf = StateFilter(db)
+        rag = {"Elena": "Elena walks.", "Ghost": "Ghost appears."}
+        filtered = sf.apply(rag)
+        assert "Elena" in filtered
+        # Note: StateFilter only blocks characters IN StateDB that are deceased/inactive.
+        # Characters not in StateDB pass through (no contradiction to filter).
+        assert "Ghost" in filtered  # Not in StateDB, so not blocked
 
-    # Verify deceased characters ARE blocked
-    db.update_character(CharacterState(name="DeadGhost", role="Villain", status="deceased"))
-    rag2 = {"Elena": "Elena walks.", "DeadGhost": "DeadGhost approaches."}
-    filtered2 = sf.apply(rag2)
-    assert "Elena" in filtered2
-    assert "DeadGhost" not in filtered2  # Deceased, blocked by filter
+        # Verify deceased characters ARE blocked
+        db.update_character(CharacterState(name="DeadGhost", role="Villain", status="deceased"))
+        rag2 = {"Elena": "Elena walks.", "DeadGhost": "DeadGhost approaches."}
+        filtered2 = sf.apply(rag2)
+        assert "Elena" in filtered2
+        assert "DeadGhost" not in filtered2  # Deceased, blocked by filter
 
-    # 8. Snapshot for rollback
-    snapshot = StateSnapshot(
-        version=1,
-        chapter_num=1,
-        characters=[char],
-        world_states=[WorldState(name="era", description="fantasy")],
-        metadata={"label": "pre_chapter_2"},
-    )
-    db.save_snapshot(snapshot)
-    snapshots = db.list_snapshots()
-    assert len(snapshots) == 1
+        # 8. Snapshot for rollback
+        snapshot = StateSnapshot(
+            version=1,
+            chapter_num=1,
+            characters=[char],
+            world_states=[WorldState(name="era", description="fantasy")],
+            metadata={"label": "pre_chapter_2"},
+        )
+        db.save_snapshot(snapshot)
+        snapshots = db.list_snapshots()
+        assert len(snapshots) == 1
 
     # 9. Token tracking
     tracker = TokenTracker()
