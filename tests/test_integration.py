@@ -1,4 +1,5 @@
 """Integration test - full pipeline end-to-end with mocked LLM calls."""
+import uuid
 import pytest
 from Engine.core.state_db import StateDB
 from Engine.core.models import CharacterState, WorldState, StateSnapshot
@@ -58,10 +59,11 @@ def test_full_pipeline_mock():
     assert retrieved.name == "Hero"
 
     # 6. MemoryBank stores summary
-    bank = MemoryBank()
+    bank = MemoryBank(collection_name=f"test_integration_{uuid.uuid4().hex[:8]}")
     bank.add_summary(1, "Hero begins the journey.")
     results = bank.query("journey")
     assert len(results) > 0
+    assert any("journey" in r for r in results)
 
     # 7. StateFilter validates context (no conflicts)
     sf = StateFilter()
