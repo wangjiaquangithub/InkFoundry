@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -60,6 +60,24 @@ def create_app() -> FastAPI:
         if char is None:
             return {"error": f"Character '{name}' not found"}
         return char.model_dump()
+
+import asyncio
+
+    @app.websocket("/ws/pipeline")
+    async def websocket_pipeline(websocket: WebSocket):
+        await websocket.accept()
+        try:
+            while True:
+                # Send heartbeat/status updates
+                await asyncio.sleep(5)
+                await websocket.send_json({
+                    "step": "idle",
+                    "agent": None,
+                    "progress": 0,
+                    "status": "waiting",
+                })
+        except Exception:
+            pass
 
     # --- Static file serving for React SPA ---
     FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
