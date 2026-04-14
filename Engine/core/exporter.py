@@ -6,6 +6,12 @@ from html import escape
 from typing import Optional
 
 
+def _validate_output_path(file_path: str) -> None:
+    """Reject path traversal attempts."""
+    if ".." in file_path.split(os.sep) or ".." in file_path.replace("\\", "/").split("/"):
+        raise ValueError(f"Invalid output path: {file_path}")
+
+
 class NovelExporter:
     """Export novels to plain text, Markdown, and HTML/EPUB formats."""
 
@@ -19,6 +25,7 @@ class NovelExporter:
             novel: Dict with "title" and "chapters" keys.
             file_path: Output file path.
         """
+        _validate_output_path(file_path)
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(f"# {novel.get('title', 'Untitled')}\n\n")
@@ -35,6 +42,7 @@ class NovelExporter:
             novel: Dict with "title" and "chapters" keys.
             file_path: Output file path.
         """
+        _validate_output_path(file_path)
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(f"# {novel.get('title', 'Untitled')}\n\n")
@@ -54,6 +62,7 @@ class NovelExporter:
             novel: Dict with "title" and "chapters" keys.
             file_path: Output file path.
         """
+        _validate_output_path(file_path)
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         html_content = NovelExporter._to_html(novel)
         with open(file_path, "w", encoding="utf-8") as f:

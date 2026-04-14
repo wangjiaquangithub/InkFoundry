@@ -154,7 +154,7 @@ class WatchdogTimer:
         self._timeout = timeout_seconds
         self._event_bus = event_bus
         self._timer: threading.Timer | None = None
-        self._timed_out = False
+        self._timed_out = threading.Event()
 
     def start(self, step_name: str):
         """Start the watchdog for a new step.
@@ -181,7 +181,7 @@ class WatchdogTimer:
 
     def _on_timeout(self, step_name: str):
         """Called when the watchdog timer expires."""
-        self._timed_out = True
+        self._timed_out.set()
         if self._event_bus:
             self._event_bus.publish(
                 "pipeline_progress",
@@ -191,4 +191,4 @@ class WatchdogTimer:
     @property
     def timed_out(self) -> bool:
         """Whether the watchdog has triggered a timeout."""
-        return self._timed_out
+        return self._timed_out.is_set()

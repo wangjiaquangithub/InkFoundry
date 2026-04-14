@@ -3,6 +3,28 @@ import pytest
 from Engine.core.controller import PipelineController, CircuitBreakerError
 
 
+def test_execute_with_retry_does_not_swallow_keyboard_interrupt():
+    """CRITICAL: KeyboardInterrupt must NOT be caught by execute_with_retry."""
+    ctrl = PipelineController(max_retries=3)
+
+    def raise_keyboard():
+        raise KeyboardInterrupt("User interrupted")
+
+    with pytest.raises(KeyboardInterrupt):
+        ctrl.execute_with_retry(raise_keyboard)
+
+
+def test_execute_with_retry_does_not_swallow_system_exit():
+    """CRITICAL: SystemExit must NOT be caught by execute_with_retry."""
+    ctrl = PipelineController(max_retries=3)
+
+    def raise_system_exit():
+        raise SystemExit(1)
+
+    with pytest.raises(SystemExit):
+        ctrl.execute_with_retry(raise_system_exit)
+
+
 def test_circuit_breaker_triggers():
     ctrl = PipelineController(max_retries=2)
 

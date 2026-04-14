@@ -1,8 +1,10 @@
 """Tests for Novel Importer."""
 from __future__ import annotations
 
-import tempfile
 import os
+import tempfile
+
+import pytest
 
 from Engine.core.importer import NovelImporter
 
@@ -79,3 +81,9 @@ def test_import_default_genre():
 def test_import_empty_content():
     novel = NovelImporter.from_text("")
     assert novel.chapter_count == 0
+
+
+def test_import_rejects_path_traversal():
+    """HIGH: Importer must reject path traversal attempts."""
+    with pytest.raises(ValueError, match="(?i)path"):
+        NovelImporter.from_file("../../../etc/passwd")

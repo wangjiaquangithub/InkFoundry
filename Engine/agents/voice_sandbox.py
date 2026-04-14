@@ -1,6 +1,8 @@
 """Voice Sandbox - injects character voice profiles into prompts."""
 from __future__ import annotations
 
+import os
+
 import yaml
 
 
@@ -11,6 +13,8 @@ class VoiceSandbox:
     """
 
     def __init__(self, config_path: str):
+        if ".." in config_path.split(os.sep) or ".." in config_path.replace("\\", "/").split("/"):
+            raise ValueError(f"Invalid config path: {config_path}")
         with open(config_path) as f:
             self.config = yaml.safe_load(f)
 

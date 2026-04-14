@@ -1,6 +1,7 @@
 """Tests for Daemon Scheduler."""
 from __future__ import annotations
 
+import logging
 import time
 from Engine.core.daemon import DaemonScheduler
 
@@ -42,3 +43,29 @@ def test_current_task_tracking():
     time.sleep(0.3)
     # Task should have been processed
     scheduler.stop()
+
+
+def test_daemon_continues_after_callback_exception():
+    """CRITICAL: Daemon must continue processing tasks when a callback raises.
+
+    A single callback exception should not kill the entire daemon thread.
+    """
+    scheduler = DaemonScheduler()
+    successful_callbacks = []
+
+    def flaky_callback(task):
+        if task.get("fail"):
+            raise RuntimeError("Callback failure")
+        successful_callbacks.append(task)
+
+    scheduler.on_complete(flaky_callback)
+    scheduler.add_task({"id": 1, "fail": True})  # Will raise
+    scheduler.add_task({"id": 2, "fail": False})  # Should still process
+
+    scheduler.start()
+    time.sleep(1.0)
+    scheduler.stop()
+
+    # Task 2 should have been processed despite task 1's callback failing
+    assert len(successful_callbacks) >= 1
+    assert successful_callbacks[0]["id"] == 2

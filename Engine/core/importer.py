@@ -6,6 +6,12 @@ import re
 from dataclasses import dataclass, field
 
 
+def _validate_input_path(file_path: str) -> None:
+    """Reject path traversal attempts."""
+    if ".." in file_path.split(os.sep) or ".." in file_path.replace("\\", "/").split("/"):
+        raise ValueError(f"Invalid input path: {file_path}")
+
+
 @dataclass
 class ImportedNovel:
     """A novel imported from a text file with parsed chapters."""
@@ -36,6 +42,7 @@ class NovelImporter:
         Raises:
             ValueError: If the file format is not supported.
         """
+        _validate_input_path(file_path)
         ext = os.path.splitext(file_path)[1].lower()
         if ext not in NovelImporter.SUPPORTED_FORMATS:
             raise ValueError(

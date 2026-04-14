@@ -1,8 +1,11 @@
 """Background daemon for automatic novel generation."""
 from __future__ import annotations
-import asyncio
+import logging
 import threading
+import time
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class DaemonScheduler:
@@ -51,13 +54,15 @@ class DaemonScheduler:
         while self._running:
             with self._lock:
                 if not self._task_queue:
-                    import time
                     time.sleep(1)
                     continue
                 self._current_task = self._task_queue.pop(0)
 
             # Simulate task execution (in real impl, this calls the pipeline)
             for callback in self._callbacks:
-                callback(self._current_task)
+                try:
+                    callback(self._current_task)
+                except Exception:
+                    logger.exception("Callback failed for task %s", self._current_task)
 
             self._current_task = None

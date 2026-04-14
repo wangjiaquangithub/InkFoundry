@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, WebSocket
+from fastapi import Depends, FastAPI, Request, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -21,12 +21,23 @@ class CharacterCreate(BaseModel):
     status: str = "active"
 
 
+def _get_db(request: Request) -> StateDB:
+    """Dependency injection for StateDB."""
+    return request.app.state.db
+
+
 def create_app() -> FastAPI:
     """Create and configure the Studio FastAPI application."""
-    app = FastAPI(title="InkFoundry Studio")
 
-    # In-memory StateDB for Studio API (separate from Engine's persistent db)
-    db = StateDB(":memory:")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Manage application lifecycle with proper resource cleanup."""
+        db = StateDB(":memory:")
+        app.state.db = db
+        yield
+        db.close()
+
+    app = FastAPI(title="InkFoundry Studio", lifespan=lifespan)
 
     @app.get("/status")
     def get_status() -> Dict[str, str]:
@@ -39,7 +50,7 @@ def create_app() -> FastAPI:
         return {"healthy": True}
 
     @app.get("/characters")
-    def list_characters() -> Dict[str, List[Dict[str, Any]]]:
+    def list_characters(db: StateDB = Depends(_get_db)) -> Dict[str, List[Dict[str, Any]]]:
         """List all characters."""
         cursor = db.conn.execute("SELECT data FROM characters")
         chars = []
@@ -48,14 +59,14 @@ def create_app() -> FastAPI:
         return {"characters": chars}
 
     @app.post("/characters")
-    def create_character(char: CharacterCreate) -> Dict[str, str]:
+    def create_character(char: CharacterCreate, db: StateDB = Depends(_get_db)) -> Dict[str, str]:
         """Create a new character."""
         state = CharacterState(name=char.name, role=char.role, status=char.status)
         db.update_character(state)
         return {"message": f"Character '{char.name}' created"}
 
     @app.get("/characters/{name}")
-    def get_character(name: str) -> Dict[str, Any]:
+    def get_character(name: str, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         """Get a specific character."""
         char = db.get_character(name)
         if char is None:
@@ -75,7 +86,10 @@ def create_app() -> FastAPI:
                     "status": "waiting",
                 })
         except Exception:
-            pass
+            try:
+                await websocket.close()
+            except Exception:
+                pass  # Already closed
 
     # --- Static file serving for React SPA ---
     FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")

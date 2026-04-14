@@ -69,3 +69,9 @@ def test_voice_sandbox_with_sensory_bias():
         assert "visual" in prompt
     finally:
         os.unlink(temp_path)
+
+
+def test_voice_sandbox_rejects_path_traversal():
+    """HIGH: VoiceSandbox must reject path traversal attempts."""
+    with pytest.raises(ValueError, match="(?i)path"):
+        VoiceSandbox("../../../etc/passwd")

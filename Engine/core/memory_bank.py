@@ -191,3 +191,11 @@ class MemoryBank:
             text: The summary text.
         """
         self.store(text, metadata={"chapter": chapter_num})
+
+    def close(self) -> None:
+        """Release ChromaDB resources."""
+        if self._use_real_chroma and hasattr(self, "_client"):
+            # ChromaDB PersistentClient has no explicit close(),
+            # but we null the reference to prevent further use.
+            self._client = None
+            self._collection = None

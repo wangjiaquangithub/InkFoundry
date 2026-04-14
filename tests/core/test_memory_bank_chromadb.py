@@ -102,3 +102,23 @@ def test_memory_bank_list_documents_fallback(monkeypatch):
     assert len(docs) == 1
     assert docs[0]["content"] == "Content A"
     assert docs[0]["metadata"]["key"] == "value"
+
+
+def test_memory_bank_close():
+    """MemoryBank.close() must release ChromaDB references."""
+    mb = MemoryBank(collection_name=_unique_name())
+    mb.store("Close test")
+    assert mb.count() == 1
+    mb.close()
+    # After close, _client should be None
+    assert mb._client is None
+    assert mb._collection is None
+
+
+def test_memory_bank_close_fallback(monkeypatch):
+    """MemoryBank.close() is safe in fallback mode."""
+    monkeypatch.setattr("Engine.core.memory_bank.HAS_CHROMADB", False)
+    mb = MemoryBank(collection_name=_unique_name())
+    mb.store("Fallback close")
+    mb.close()  # Should not raise
+    assert not hasattr(mb, "_client") or mb._client is None

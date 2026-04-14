@@ -6,9 +6,10 @@ from Studio.api import create_app
 
 @pytest.fixture
 def client():
-    """Provide a test client for the Studio API."""
+    """Provide a test client for the Studio API with lifespan events."""
     app = create_app()
-    return TestClient(app)
+    with TestClient(app) as c:
+        yield c
 
 
 def test_status_endpoint(client):

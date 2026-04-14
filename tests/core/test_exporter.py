@@ -1,8 +1,10 @@
 """Tests for Novel Exporter."""
 from __future__ import annotations
 
-import tempfile
 import os
+import tempfile
+
+import pytest
 
 from Engine.core.exporter import NovelExporter
 
@@ -136,3 +138,10 @@ def test_export_empty_chapters():
         assert "Empty" in content
     finally:
         os.unlink(path)
+
+
+def test_export_rejects_path_traversal():
+    """HIGH: Exporter must reject path traversal attempts."""
+    novel = {"title": "Test", "chapters": [{"number": 1, "content": "Content"}]}
+    with pytest.raises(ValueError, match="(?i)path"):
+        NovelExporter.to_txt(novel, "../../../etc/passwd")
