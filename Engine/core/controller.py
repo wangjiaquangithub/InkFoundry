@@ -1,4 +1,4 @@
-"""Pipeline Controller with watchdog and circuit breaker."""
+"""Pipeline Controller with watchdog, circuit breaker, and Gradient Rewrite Protocol."""
 from __future__ import annotations
 
 from typing import Any, Callable
@@ -48,3 +48,90 @@ class PipelineController:
                     raise CircuitBreakerError(
                         f"Max retries ({self.max_retries}) reached. Last error: {e}"
                     )
+
+
+class GradientRewriter:
+    """3-tier retry strategy for failed chapter rewrites.
+
+    Retry 0: Localized patch — fix a single problematic paragraph.
+    Retry 1: Re-context with State_Snapshot — full chapter rewrite with state context.
+    Retry 2+: Pivot strategy — propose an entirely different plot direction.
+    """
+
+    def __init__(self, gateway, event_bus=None):
+        self._gateway = gateway
+        self._event_bus = event_bus
+
+    async def rewrite(self, draft: dict, error_context: dict, retry_num: int) -> str:
+        """Route to the appropriate rewrite strategy based on retry number."""
+        if retry_num == 0:
+            result = await self._patch_paragraph(draft, error_context)
+        elif retry_num == 1:
+            result = await self._recontext_with_state(draft, error_context)
+        else:
+            result = await self._pivot_strategy(draft, error_context)
+
+        if self._event_bus is not None:
+            self._event_bus.publish(
+                "gradient_rewrite",
+                {
+                    "retry_num": retry_num,
+                    "error": error_context.get("error", "unknown"),
+                    "result_preview": result[:100],
+                },
+            )
+
+        return result
+
+    async def _patch_paragraph(self, draft: dict, error_context: dict) -> str:
+        """Retry 0: Localized patch fix for a single paragraph."""
+        content = draft.get("content", "")
+        error_desc = error_context.get("error", "unknown error")
+
+        # Lazy import to avoid hard dependency when gateway is a fake
+        from Engine.llm.prompt_builder import PromptBuilder
+
+        builder = PromptBuilder("你是一个小说编辑。修复以下章节中的问题段落。")
+        builder.with_context(
+            f"原始内容:\n{content}\n\n问题描述: {error_desc}\n\n请修复问题段落，保持原文风格。"
+        )
+        messages = builder.build()
+
+        result = await self._gateway.chat(messages, temperature=0.3, max_tokens=2048)
+        return result
+
+    async def _recontext_with_state(self, draft: dict, error_context: dict) -> str:
+        """Retry 1: Full chapter rewrite with State_Snapshot context."""
+        content = draft.get("content", "")
+        error_desc = error_context.get("error", "unknown error")
+        state_snapshot = error_context.get("state_snapshot", {})
+
+        from Engine.llm.prompt_builder import PromptBuilder
+
+        builder = PromptBuilder("你是一个小说编辑。根据当前角色和世界状态，重写以下章节。")
+        builder.with_state_snapshot(state_snapshot)
+        builder.with_context(
+            f"原始内容:\n{content}\n\n问题描述: {error_desc}\n\n请在保持状态一致性的前提下重写章节。"
+        )
+        messages = builder.build()
+
+        result = await self._gateway.chat(messages, temperature=0.5, max_tokens=4096)
+        return result
+
+    async def _pivot_strategy(self, draft: dict, error_context: dict) -> str:
+        """Retry 2+: Plot pivot — propose an alternative direction and rewrite."""
+        content = draft.get("content", "")
+        error_desc = error_context.get("error", "unknown error")
+
+        from Engine.llm.prompt_builder import PromptBuilder
+
+        builder = PromptBuilder(
+            "你是一个小说策划。以下章节存在严重问题，请提出一个完全不同的剧情方向并重写。"
+        )
+        builder.with_context(
+            f"原始内容:\n{content}\n\n问题描述: {error_desc}\n\n请提出一个新的剧情方向并重写章节。"
+        )
+        messages = builder.build()
+
+        result = await self._gateway.chat(messages, temperature=0.8, max_tokens=4096)
+        return result
