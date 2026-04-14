@@ -37,22 +37,39 @@ Navigator ──> Writer ──> Editor ──> RedTeam
 |-----------|---------|
 | **StateDB** | SQLite-backed state store with atomic locks, versioning, snapshots |
 | **StateFilter** | Hard truth filter — StateDB blocks contradictory RAG results |
-| **Controller** | Pipeline with retry, circuit breaker, graceful degradation |
+| **Controller** | Pipeline with retry, circuit breaker, graceful degradation, watchdog timeout |
+| **EventBus** | In-process event pub/sub for cross-component communication |
+| **ReviewPolicyManager** | Configurable approval policies (strict, milestone, headless) |
+| **GradientRewriter** | Escalating rewrite protocol (patch → re-context → pivot) |
+| **MemoryBank** | ChromaDB-backed vector memory with fallback mode |
+| **NovelImporter/Exporter** | TXT, Markdown, EPUB import/export with path traversal protection |
+| **TokenTracker** | Per-session token usage accounting |
+| **ProjectManager** | Project lifecycle and metadata management |
+| **DaemonScheduler** | Background task queue for automatic novel generation |
+| **GenreValidator** | Genre-specific constraint validation |
 | **WriterAgent** | Draft generation from task cards |
 | **EditorAgent** | Logic and style review |
 | **RedTeamAgent** | Adversarial plot attack |
 | **NavigatorAgent** | Pacing control via tension heatmap |
 | **DirectorAgent** | Sandbox control, loop detection |
+| **VoiceSandbox** | Character voice profile injection into prompts |
+| **SideStoryAgent** | Side story / spin-off generation |
+| **ImitationAgent** | Style imitation learning |
+| **LLMGateway** | Unified LLM API client with retry, streaming, timeout |
+| **PromptBuilder** | Composable prompt assembly with constraint injection |
+| **AIFilter** | AI-powered content safety filter |
+| **StyleExtractor** | Prose style extraction and analysis |
 | **ModelRouter** | Hierarchical LLM routing (default → role-specific → task override) |
 | **EngineConfig** | Environment variable loader for API keys, endpoints, per-role models |
+| **MCPServer** | Standard protocol exposing StateDB operations |
 
 ### Layer 2: Studio (Command Surface)
 
 | Component | Purpose |
 |-----------|---------|
-| **Studio API** | FastAPI REST backend for character management |
+| **Studio API** | FastAPI REST + WebSocket backend with lifespan-managed StateDB |
 | **MCP Server** | Standard protocol exposing StateDB operations |
-| **Dashboard** | *(planned)* Tension heatmap, causality graph, manual intervention |
+| **Dashboard** | React SPA (Vite + shadcn/ui), workspace view with real-time pipeline push |
 
 ## Quick Start
 
@@ -115,7 +132,7 @@ On Retry 3, `graceful_degradation=True` returns a fallback instead of raising, s
 ## Test Results
 
 ```
-73 tests passing, 95% coverage
+198 tests passing, 94% coverage
 ```
 
 Run with coverage:
@@ -129,15 +146,17 @@ pytest --cov=Engine --cov-report=term-missing
 InkFoundry/
 ├── Engine/
 │   ├── config.py              # Environment config loader
-│   ├── core/                  # StateDB, Filter, Controller, Models, Memory, MCP
-│   ├── agents/                # Writer, Editor, RedTeam, Navigator, Director, Voice
+│   ├── core/                  # StateDB, Filter, Controller, EventBus, Memory, MCP, Daemon, etc.
+│   ├── agents/                # Writer, Editor, RedTeam, Navigator, Director, Voice, SideStory, Imitation
+│   ├── llm/                   # LLMGateway, PromptBuilder, AIFilter, StyleExtractor
 │   ├── utils/                 # ModelRouter
 │   ├── configs/voices/        # Voice profile templates
 │   └── __init__.py
 ├── Studio/
-│   └── api.py                 # FastAPI REST backend
-├── tests/                     # 73 tests mirroring Engine structure
+│   └── api.py                 # FastAPI REST + WebSocket with lifespan-managed StateDB
+├── tests/                     # 198 tests mirroring Engine structure
 ├── docs/                      # Plans, architecture, development guide
+├── frontend/                  # React SPA (Vite + shadcn/ui) — planned
 ├── Architecture_V3.md         # Full system blueprint
 ├── .env.example               # Environment variable template
 └── requirements.txt
