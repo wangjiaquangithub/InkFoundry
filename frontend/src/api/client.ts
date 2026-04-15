@@ -60,6 +60,13 @@ export const api = {
   runBatch: (data: { start_chapter: number; end_chapter: number }) =>
     client.post("/api/pipeline/run-batch", data),
   getPipelineStatus: () => client.get("/api/pipeline/status"),
+  pausePipeline: () => client.post("/api/pipeline/pause"),
+  resumePipeline: () => client.post("/api/pipeline/resume"),
+  stopPipeline: () => client.post("/api/pipeline/stop"),
+
+  // Configuration
+  getConfig: () => client.get("/api/config"),
+  saveConfig: (data: Record<string, any>) => client.post("/api/config", data),
 
   // State
   getStateSnapshot: () => client.get("/api/state/snapshot"),

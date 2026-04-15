@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useNovelStore } from "../store/novelStore";
 import { usePipelineStore } from "../stores/pipelineStore";
 import { api } from "../api/client";
+import { useWebSocket } from "../hooks/useWebSocket";
 import { Button } from "../components/ui/button";
 import { ChapterEditor } from "../components/ChapterEditor";
 import { PipelineStatusBar } from "../components/PipelineStatusBar";
@@ -37,6 +38,11 @@ export function Workspace() {
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [outline, setOutline] = useState<Outline | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // WebSocket connection for real-time pipeline events
+  const { connect: wsConnect, disconnect: wsDisconnect } = useWebSocket(
+    `ws://${window.location.host}/ws/pipeline`
+  );
 
   useEffect(() => {
     fetchStatus();

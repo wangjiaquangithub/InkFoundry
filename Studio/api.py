@@ -106,6 +106,21 @@ class PipelineStart(BaseModel):
     end_chapter: int = 10
 
 
+class ConfigSave(BaseModel):
+    """Configuration save request."""
+    llm_api_key: Optional[str] = None
+    llm_base_url: Optional[str] = None
+    default_model: Optional[str] = None
+    writer_model: Optional[str] = None
+    editor_model: Optional[str] = None
+    redteam_model: Optional[str] = None
+    navigator_model: Optional[str] = None
+    director_model: Optional[str] = None
+    review_mode: Optional[str] = None
+    max_retries: Optional[int] = None
+    pipeline_parallel: Optional[bool] = None
+
+
 def _get_db(request: Request) -> StateDB:
     """Dependency injection for StateDB."""
     return request.app.state.db
@@ -131,7 +146,9 @@ def create_app(seed_data: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Manage application lifecycle with proper resource cleanup."""
-        db = StateDB(":memory:")
+        # Use persistent SQLite file instead of in-memory database
+        db_path = os.environ.get("INKFOUNDRY_DB_PATH", "state.db")
+        db = StateDB(db_path)
         app.state.db = db
         if seed_data:
             _seed_sample_data(db)
@@ -150,6 +167,77 @@ def create_app(seed_data: bool = True) -> FastAPI:
     def health_check() -> Dict[str, bool]:
         """Health check endpoint."""
         return {"healthy": True}
+
+    # --- Configuration Center ---
+    @app.get("/api/config")
+    def get_config(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Get current configuration from database."""
+        import os
+        # Try to get from env first
+        config = {
+            "llm_api_key": os.getenv("LLM_API_KEY", ""),
+            "llm_base_url": os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
+            "default_model": os.getenv("DEFAULT_MODEL", "qwen-plus"),
+            "writer_model": os.getenv("WRITER_MODEL", ""),
+            "editor_model": os.getenv("EDITOR_MODEL", ""),
+            "redteam_model": os.getenv("REDTEAM_MODEL", ""),
+            "navigator_model": os.getenv("NAVIGATOR_MODEL", ""),
+            "director_model": os.getenv("DIRECTOR_MODEL", ""),
+            "review_mode": "strict",
+            "max_retries": 3,
+            "pipeline_parallel": False,
+        }
+        # Override with DB-stored values if they exist
+        try:
+            cursor = db.conn.execute("SELECT data FROM state WHERE key = 'config'")
+            row = cursor.fetchone()
+            if row:
+                db_config = json.loads(row[0])
+                config.update(db_config)
+        except Exception:
+            pass  # No config stored yet
+        # Mask API key for security (show last 4 chars)
+        if config["llm_api_key"] and len(config["llm_api_key"]) > 8:
+            config["llm_api_key_masked"] = "****" + config["llm_api_key"][-4:]
+        return config
+
+    @app.post("/api/config")
+    def save_config(body: ConfigSave, db: StateDB = Depends(_get_db)) -> Dict[str, str]:
+        """Save configuration to database."""
+        import os
+        # Get existing config
+        existing_config = {}
+        try:
+            cursor = db.conn.execute("SELECT data FROM state WHERE key = 'config'")
+            row = cursor.fetchone()
+            if row:
+                existing_config = json.loads(row[0])
+        except Exception:
+            pass
+
+        # Update config with new values
+        new_config = existing_config.copy()
+        for field_name in body.model_fields_set:
+            value = getattr(body, field_name)
+            if value is not None:
+                new_config[field_name] = value
+
+        # Store in database
+        db.conn.execute(
+            "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
+            ("config", json.dumps(new_config)),
+        )
+        db.conn.commit()
+
+        # Also update environment for current session
+        if body.llm_api_key:
+            os.environ["LLM_API_KEY"] = body.llm_api_key
+        if body.llm_base_url:
+            os.environ["LLM_BASE_URL"] = body.llm_base_url
+        if body.default_model:
+            os.environ["DEFAULT_MODEL"] = body.default_model
+
+        return {"message": "Configuration saved"}
 
     # --- Characters (no /api prefix) ---
     @app.get("/characters")
@@ -517,6 +605,30 @@ def create_app(seed_data: bool = True) -> FastAPI:
         from Engine.core.orchestrator import PipelineOrchestrator
         orb = PipelineOrchestrator(state_db=db)
         return orb.status
+
+    @app.post("/api/pipeline/pause")
+    def pipeline_pause(db: StateDB = Depends(_get_db)) -> Dict[str, str]:
+        """Pause the pipeline."""
+        from Engine.core.orchestrator import PipelineOrchestrator
+        orb = PipelineOrchestrator(state_db=db)
+        orb.pause()
+        return {"message": "Pipeline paused"}
+
+    @app.post("/api/pipeline/resume")
+    def pipeline_resume(db: StateDB = Depends(_get_db)) -> Dict[str, str]:
+        """Resume the pipeline."""
+        from Engine.core.orchestrator import PipelineOrchestrator
+        orb = PipelineOrchestrator(state_db=db)
+        orb.resume()
+        return {"message": "Pipeline resumed"}
+
+    @app.post("/api/pipeline/stop")
+    def pipeline_stop(db: StateDB = Depends(_get_db)) -> Dict[str, str]:
+        """Stop the pipeline."""
+        from Engine.core.orchestrator import PipelineOrchestrator
+        orb = PipelineOrchestrator(state_db=db)
+        orb.stop()
+        return {"message": "Pipeline stopped"}
 
     # --- /api/ prefixed routes (for frontend compatibility) ---
     api_router = []

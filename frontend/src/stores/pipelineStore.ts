@@ -73,15 +73,30 @@ export const usePipelineStore = create<PipelineState>((set) => ({
   },
 
   pause: async () => {
-    set({ paused: true });
+    try {
+      await api.pausePipeline();
+      set({ paused: true });
+    } catch (e: any) {
+      set({ error: e.message });
+    }
   },
 
   resume: async () => {
-    set({ paused: false });
+    try {
+      await api.resumePipeline();
+      set({ paused: false });
+    } catch (e: any) {
+      set({ error: e.message });
+    }
   },
 
   stop: async () => {
-    set({ running: false, paused: false, currentStep: "", progress: 0 });
+    try {
+      await api.stopPipeline();
+      set({ running: false, paused: false, currentStep: "", progress: 0 });
+    } catch (e: any) {
+      set({ error: e.message });
+    }
   },
 
   setError: (error: string | null) => {
