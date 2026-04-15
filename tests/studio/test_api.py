@@ -7,7 +7,7 @@ from Studio.api import create_app
 @pytest.fixture
 def client():
     """Provide a test client for the Studio API with lifespan events."""
-    app = create_app()
+    app = create_app(seed_data=False)
     with TestClient(app) as c:
         yield c
 
@@ -16,7 +16,7 @@ def test_status_endpoint(client):
     response = client.get("/status")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "running"
+    assert data["status"] == "idle"
 
 
 def test_health_endpoint(client):
