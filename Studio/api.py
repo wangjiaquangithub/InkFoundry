@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
@@ -12,7 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from Engine.core.state_db import StateDB
-from Engine.core.models import CharacterState
+from Engine.core.models import (
+    CharacterState, Chapter, Outline, CharacterProfile,
+    CharacterRelationship, WorldBuilding, PowerSystem, Timeline,
+)
 
 
 class CharacterCreate(BaseModel):
@@ -40,6 +44,66 @@ class ProjectStatus(BaseModel):
     current_chapter: int = 1
     total_chapters: int = 10
     status: str = "idle"
+
+
+class ChapterCreate(BaseModel):
+    title: str = ""
+    content: str = ""
+
+
+class ChapterUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ProfileCreate(BaseModel):
+    name: str
+    gender: str = ""
+    age: int = 0
+    appearance: str = ""
+    personality: str = ""
+    backstory: str = ""
+    motivation: str = ""
+    voice_profile_ref: str = "default"
+
+
+class ProfileUpdate(BaseModel):
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    appearance: Optional[str] = None
+    personality: Optional[str] = None
+    backstory: Optional[str] = None
+    motivation: Optional[str] = None
+    voice_profile_ref: Optional[str] = None
+
+
+class RelationshipCreate(BaseModel):
+    from_character: str
+    to_character: str
+    relationship_type: str
+    description: str = ""
+    strength: float = 0.5
+
+
+class WorldBuildingCreate(BaseModel):
+    name: str
+    era: str = ""
+    geography: str = ""
+    social_structure: str = ""
+    technology_level: str = ""
+
+
+class OutlineGenerate(BaseModel):
+    genre: str = "xuanhuan"
+    title: str = "Untitled"
+    summary: str = ""
+    total_chapters: int = 100
+
+
+class PipelineStart(BaseModel):
+    start_chapter: int = 1
+    end_chapter: int = 10
 
 
 def _get_db(request: Request) -> StateDB:
@@ -169,6 +233,247 @@ def create_app(seed_data: bool = True) -> FastAPI:
                 await websocket.close()
             except Exception:
                 pass  # Already closed
+
+    # --- New API endpoints: Chapters, Outlines, Profiles, Pipeline ---
+
+    # --- Chapters ---
+    @app.get("/api/chapters")
+    def list_chapters(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        chapters = db.list_chapters()
+        return {"chapters": [ch.model_dump() for ch in chapters]}
+
+    @app.get("/api/chapters/{chapter_num}")
+    def get_chapter(chapter_num: int, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        ch = db.get_chapter(chapter_num)
+        if ch is None:
+            raise HTTPException(status_code=404, detail=f"Chapter {chapter_num} not found")
+        return ch.model_dump()
+
+    @app.post("/api/chapters")
+    def create_chapter(ch: ChapterCreate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        existing = db.list_chapters()
+        next_num = max([c.chapter_num for c in existing], default=0) + 1
+        chapter = Chapter(
+            chapter_num=next_num,
+            title=ch.title or f"Chapter {next_num}",
+            content=ch.content,
+        )
+        db.update_chapter(chapter)
+        return {"message": f"Chapter {next_num} created", "chapter": chapter.model_dump()}
+
+    @app.put("/api/chapters/{chapter_num}")
+    def update_chapter(chapter_num: int, ch: ChapterUpdate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        existing = db.get_chapter(chapter_num)
+        if existing is None:
+            raise HTTPException(status_code=404, detail=f"Chapter {chapter_num} not found")
+        if ch.title is not None:
+            existing.title = ch.title
+        if ch.content is not None:
+            existing.content = ch.content
+        if ch.status is not None:
+            existing.status = ch.status
+        existing.updated_at = datetime.now().isoformat()
+        db.update_chapter(existing)
+        return {"message": f"Chapter {chapter_num} updated"}
+
+    @app.delete("/api/chapters/{chapter_num}")
+    def delete_chapter(chapter_num: int, db: StateDB = Depends(_get_db)) -> Dict[str, str]:
+        db.delete_chapter(chapter_num)
+        return {"message": f"Chapter {chapter_num} deleted"}
+
+    # --- Outlines ---
+    @app.get("/api/outlines")
+    def get_outline(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        outline = db.get_outline()
+        if outline is None:
+            return {"outline": None}
+        return {"outline": outline.model_dump()}
+
+    @app.post("/api/outlines/generate")
+    def generate_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        from Engine.agents.outline import OutlineAgent
+        agent = OutlineAgent()
+        outline = agent.run(
+            genre=body.genre,
+            title=body.title,
+            summary=body.summary,
+            total_chapters=body.total_chapters,
+        )
+        db.save_outline(outline)
+        return {"message": "Outline generated", "outline": outline.model_dump()}
+
+    @app.put("/api/outlines")
+    def update_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        from Engine.agents.outline import OutlineAgent
+        agent = OutlineAgent()
+        outline = agent.run(
+            genre="xuanhuan",
+            title=body.title,
+            summary=body.summary,
+            total_chapters=body.total_chapters,
+        )
+        db.save_outline(outline)
+        return {"message": "Outline updated", "outline": outline.model_dump()}
+
+    # --- Character Profiles ---
+    @app.get("/api/profiles")
+    def list_profiles(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        profiles = db.list_character_profiles()
+        return {"profiles": [p.model_dump() for p in profiles]}
+
+    @app.get("/api/profiles/{name}")
+    def get_profile(name: str, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        profile = db.get_character_profile(name)
+        if profile is None:
+            raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+        return profile.model_dump()
+
+    @app.post("/api/profiles")
+    def create_profile(body: ProfileCreate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        profile = CharacterProfile(
+            name=body.name,
+            gender=body.gender,
+            age=body.age,
+            appearance=body.appearance,
+            personality=body.personality,
+            backstory=body.backstory,
+            motivation=body.motivation,
+            voice_profile_ref=body.voice_profile_ref,
+        )
+        db.save_character_profile(profile)
+        return {"message": f"Profile '{body.name}' created"}
+
+    @app.put("/api/profiles/{name}")
+    def update_profile(name: str, body: ProfileUpdate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        existing = db.get_character_profile(name)
+        if existing is None:
+            raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+        if body.gender is not None:
+            existing.gender = body.gender
+        if body.age is not None:
+            existing.age = body.age
+        if body.appearance is not None:
+            existing.appearance = body.appearance
+        if body.personality is not None:
+            existing.personality = body.personality
+        if body.backstory is not None:
+            existing.backstory = body.backstory
+        if body.motivation is not None:
+            existing.motivation = body.motivation
+        if body.voice_profile_ref is not None:
+            existing.voice_profile_ref = body.voice_profile_ref
+        db.save_character_profile(existing)
+        return {"message": f"Profile '{name}' updated"}
+
+    @app.delete("/api/profiles/{name}")
+    def delete_profile(name: str, db: StateDB = Depends(_get_db)) -> Dict[str, str]:
+        # Soft delete: just remove from profiles table
+        db.conn.execute("DELETE FROM character_profiles WHERE name = ?", (name,))
+        db.conn.commit()
+        return {"message": f"Profile '{name}' deleted"}
+
+    # --- Character Relationships ---
+    @app.get("/api/relationships")
+    def list_relationships(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        rels = db.list_all_relationships()
+        return {"relationships": [r.model_dump() for r in rels]}
+
+    @app.post("/api/relationships")
+    def create_relationship(body: RelationshipCreate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        rel = CharacterRelationship(
+            from_character=body.from_character,
+            to_character=body.to_character,
+            relationship_type=body.relationship_type,
+            description=body.description,
+            strength=body.strength,
+        )
+        db.add_character_relationship(rel)
+        return {"message": "Relationship created"}
+
+    # --- World Building ---
+    @app.get("/api/world-building")
+    def get_world_building(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        wb = db.get_world_building()
+        if wb is None:
+            return {"world_building": None}
+        return {"world_building": wb.model_dump()}
+
+    @app.post("/api/world-building")
+    def create_world_building(body: WorldBuildingCreate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        wb = WorldBuilding(
+            name=body.name,
+            era=body.era,
+            geography=body.geography,
+            social_structure=body.social_structure,
+            technology_level=body.technology_level,
+        )
+        db.save_world_building(wb)
+        return {"message": "World building saved"}
+
+    @app.put("/api/world-building")
+    def update_world_building(body: WorldBuildingCreate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        wb = WorldBuilding(
+            name=body.name,
+            era=body.era,
+            geography=body.geography,
+            social_structure=body.social_structure,
+            technology_level=body.technology_level,
+        )
+        db.save_world_building(wb)
+        return {"message": "World building updated"}
+
+    # --- Power Systems ---
+    @app.get("/api/power-systems")
+    def list_power_systems(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        systems = db.get_power_systems()
+        return {"power_systems": [s.model_dump() for s in systems]}
+
+    @app.post("/api/power-systems")
+    def create_power_system(body: Dict[str, Any], db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        ps = PowerSystem(
+            name=body.get("name", ""),
+            levels=body.get("levels", []),
+            rules=body.get("rules", ""),
+        )
+        db.add_power_system(ps)
+        return {"message": "Power system created"}
+
+    # --- Timeline ---
+    @app.get("/api/timeline")
+    def get_timeline(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        events = db.get_timeline()
+        return {"timeline": [e.model_dump() for e in events]}
+
+    @app.post("/api/timeline")
+    def create_timeline_event(body: Dict[str, Any], db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        tl = Timeline(
+            year=body.get("year", 0),
+            event=body.get("event", ""),
+            impact=body.get("impact", ""),
+        )
+        db.add_timeline_event(tl)
+        return {"message": "Timeline event created"}
+
+    # --- Pipeline Control ---
+    @app.post("/api/pipeline/run-chapter/{chapter_num}")
+    def run_chapter(chapter_num: int, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        from Engine.core.orchestrator import PipelineOrchestrator
+        orb = PipelineOrchestrator(state_db=db)
+        result = orb.run_chapter(chapter_num)
+        return result
+
+    @app.post("/api/pipeline/run-batch")
+    def run_batch(body: PipelineStart, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        from Engine.core.orchestrator import PipelineOrchestrator
+        orb = PipelineOrchestrator(state_db=db)
+        results = orb.run_batch(start=body.start_chapter, end=body.end_chapter)
+        return {"results": {str(k): v for k, v in results.items()}}
+
+    @app.get("/api/pipeline/status")
+    def pipeline_status(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        from Engine.core.orchestrator import PipelineOrchestrator
+        orb = PipelineOrchestrator(state_db=db)
+        return orb.status
 
     # --- /api/ prefixed routes (for frontend compatibility) ---
     api_router = []
