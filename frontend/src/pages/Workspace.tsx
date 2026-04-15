@@ -1,6 +1,15 @@
 import { useEffect } from "react";
 import { useNovelStore } from "../store/novelStore";
 import { Button } from "../components/ui/button";
+import type { Chapter } from "../types";
+
+// Sample chapters for display when no API data
+const SAMPLE_CHAPTERS: Chapter[] = [
+  { chapter_num: 1, title: "启程", content: "第一章：启程\n\n故事从这里开始...", status: "final", tension_level: 3 },
+  { chapter_num: 2, title: "相遇", content: "第二章：相遇\n\n命运的齿轮开始转动...", status: "reviewed", tension_level: 5 },
+  { chapter_num: 3, title: "冲突", content: "第三章：冲突\n\n矛盾逐渐显现...", status: "draft", tension_level: 7 },
+  { chapter_num: 4, title: "", content: "", status: "pending", tension_level: 8 },
+];
 
 export function Workspace() {
   const { chapters, characters, selectedChapter, fetchStatus, fetchCharacters, selectChapter } = useNovelStore();
@@ -10,15 +19,28 @@ export function Workspace() {
     fetchCharacters();
   }, []);
 
-  // Sample chapters if empty
-  const displayChapters = chapters.length > 0 ? chapters : [
-    { number: 1, content: "第一章：启程\n\n故事从这里开始...", status: "final" as const, tension_level: 3 },
-    { number: 2, content: "第二章：相遇\n\n命运的齿轮开始转动...", status: "reviewed" as const, tension_level: 5 },
-    { number: 3, content: "第三章：冲突\n\n矛盾逐渐显现...", status: "draft" as const, tension_level: 7 },
-    { number: 4, content: "", status: "pending" as const, tension_level: 8 },
-  ];
+  const displayChapters = chapters.length > 0 ? chapters : SAMPLE_CHAPTERS;
+  const selected = displayChapters.find((c) => c.chapter_num === selectedChapter);
 
-  const selected = displayChapters.find((c) => c.number === selectedChapter);
+  const statusLabel = (s: string) => {
+    const map: Record<string, string> = {
+      final: "完成",
+      reviewed: "已审",
+      draft: "草稿",
+      pending: "待写",
+    };
+    return map[s] || s;
+  };
+
+  const statusColor = (s: string) => {
+    const map: Record<string, string> = {
+      final: "bg-green-100 text-green-700",
+      reviewed: "bg-blue-100 text-blue-700",
+      draft: "bg-yellow-100 text-yellow-700",
+      pending: "bg-gray-100 text-gray-500",
+    };
+    return map[s] || "bg-gray-100 text-gray-500";
+  };
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -30,25 +52,18 @@ export function Workspace() {
         <div className="p-2">
           {displayChapters.map((ch) => (
             <button
-              key={ch.number}
-              onClick={() => selectChapter(ch.number)}
+              key={ch.chapter_num}
+              onClick={() => selectChapter(ch.chapter_num)}
               className={`w-full text-left p-2 rounded-md mb-1 text-sm ${
-                selectedChapter === ch.number
+                selectedChapter === ch.chapter_num
                   ? "bg-blue-50 border border-blue-200"
                   : "hover:bg-gray-50"
               }`}
             >
               <div className="flex justify-between items-center">
-                <span className="font-medium">第{ch.number}章</span>
-                <span className={`text-xs px-1.5 py-0.5 rounded ${
-                  ch.status === "final" ? "bg-green-100 text-green-700" :
-                  ch.status === "reviewed" ? "bg-blue-100 text-blue-700" :
-                  ch.status === "draft" ? "bg-yellow-100 text-yellow-700" :
-                  "bg-gray-100 text-gray-500"
-                }`}>
-                  {ch.status === "final" ? "完成" :
-                   ch.status === "reviewed" ? "已审" :
-                   ch.status === "draft" ? "草稿" : "待写"}
+                <span className="font-medium">第{ch.chapter_num}章 {ch.title || ""}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor(ch.status)}`}>
+                  {statusLabel(ch.status)}
                 </span>
               </div>
               <div className="flex items-center gap-1 mt-1">
@@ -72,7 +87,7 @@ export function Workspace() {
           {selected ? (
             <>
               <div className="flex justify-between items-center mb-6">
-                <h1 className="text-2xl font-bold">第{selected.number}章</h1>
+                <h1 className="text-2xl font-bold">第{selected.chapter_num}章 {selected.title || ""}</h1>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm">编辑</Button>
                   <Button size="sm">生成</Button>
@@ -101,14 +116,14 @@ export function Workspace() {
               <div className="flex justify-between items-center">
                 <span className="font-medium">{ch.name}</span>
                 <span className={`text-xs px-1.5 py-0.5 rounded ${
-                  ch.status === "alive" ? "bg-green-100 text-green-700" :
+                  ch.status === "active" ? "bg-green-100 text-green-700" :
                   ch.status === "inactive" ? "bg-gray-100 text-gray-500" :
                   "bg-red-100 text-red-700"
                 }`}>
-                  {ch.status}
+                  {ch.role}
                 </span>
               </div>
-              <p className="text-xs text-gray-500 mt-1">{ch.description}</p>
+              <p className="text-xs text-gray-500 mt-1">状态: {ch.status}</p>
             </div>
           )) : (
             <div className="text-sm text-gray-400 p-3">暂无角色数据</div>
