@@ -5,7 +5,7 @@ import time
 from typing import Any, Dict, Optional
 
 from Engine.core.state_db import StateDB
-from Engine.core.event_bus import EventBus
+from Engine.core.event_bus import EventBus, get_event_bus
 from Engine.core.models import Chapter
 
 
@@ -21,7 +21,7 @@ class PipelineOrchestrator:
 
     def __init__(self, state_db: StateDB, event_bus: Optional[EventBus] = None):
         self.state_db = state_db
-        self.event_bus = event_bus
+        self.event_bus = event_bus if event_bus is not None else get_event_bus()
         self._running = False
         self._paused = False
         self._current_chapter = 0

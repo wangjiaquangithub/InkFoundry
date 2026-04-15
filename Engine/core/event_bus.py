@@ -32,3 +32,15 @@ class EventBus:
     def publish(self, event_type: str, data: dict):
         for token, callback in self._subscribers.get(event_type, []):
             callback(data)
+
+
+# Global singleton — shared across the application
+_global_event_bus: EventBus | None = None
+
+
+def get_event_bus() -> EventBus:
+    """Return the global shared EventBus singleton."""
+    global _global_event_bus
+    if _global_event_bus is None:
+        _global_event_bus = EventBus()
+    return _global_event_bus

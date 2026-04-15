@@ -219,16 +219,59 @@ def create_app(seed_data: bool = True) -> FastAPI:
     @app.websocket("/ws/pipeline")
     async def websocket_pipeline(websocket: WebSocket):
         await websocket.accept()
+
+        import json
+        from collections import deque
+        from Engine.core.event_bus import (
+            get_event_bus,
+            EVENT_PIPELINE_PROGRESS,
+            EVENT_CHAPTER_COMPLETE,
+            EVENT_CHAPTER_FAILED,
+        )
+
+        event_queue: deque = deque()
+
+        def _on_event(data: dict):
+            event_queue.append(data)
+
+        bus = get_event_bus()
+        token_progress = bus.subscribe(EVENT_PIPELINE_PROGRESS, _on_event)
+        token_complete = bus.subscribe(EVENT_CHAPTER_COMPLETE, _on_event)
+        token_failed = bus.subscribe(EVENT_CHAPTER_FAILED, _on_event)
+
         try:
             while True:
-                await asyncio.sleep(5)
-                await websocket.send_json({
-                    "step": "idle",
-                    "agent": None,
-                    "progress": 0,
-                    "status": "waiting",
-                })
+                # Flush queued events from EventBus
+                while event_queue:
+                    event_data = event_queue.popleft()
+                    await websocket.send_json({"type": "event", "data": event_data})
+
+                # Process incoming client messages (non-blocking check)
+                try:
+                    raw = await asyncio.wait_for(websocket.receive_text(), timeout=0.05)
+                    try:
+                        msg = json.loads(raw)
+                    except json.JSONDecodeError:
+                        await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                        continue
+
+                    action = msg.get("action", "")
+                    if action == "subscribe":
+                        await websocket.send_json({"type": "subscription_confirmed"})
+                    elif action == "ping":
+                        await websocket.send_json({"type": "pong"})
+                    elif action == "unsubscribe":
+                        break
+                    else:
+                        await websocket.send_json({"type": "error", "message": f"Unknown action: {action}"})
+                except asyncio.TimeoutError:
+                    pass
         except Exception:
+            pass
+        finally:
+            bus.unsubscribe(token_progress)
+            bus.unsubscribe(token_complete)
+            bus.unsubscribe(token_failed)
             try:
                 await websocket.close()
             except Exception:
