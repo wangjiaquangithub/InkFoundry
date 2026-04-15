@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { api } from "../api/client";
 import { Button } from "../components/ui/button";
 
 const GENRES = [
@@ -17,13 +18,30 @@ export function CreateProject() {
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
   const [totalChapters, setTotalChapters] = useState(100);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState("");
 
   const handleSubmit = async () => {
-    // Save project config and navigate to outline
-    localStorage.setItem("pendingProject", JSON.stringify({
-      genre, title, summary, totalChapters,
-    }));
-    navigate("/outline");
+    setGenerating(true);
+    setError("");
+    try {
+      // Generate outline with project config
+      await api.generateOutline({
+        genre,
+        title: title || "未命名小说",
+        summary: summary || "",
+        total_chapters: totalChapters,
+      });
+      // Save project config for reference
+      localStorage.setItem("projectConfig", JSON.stringify({
+        genre, title, summary, totalChapters,
+      }));
+      // Navigate directly to workspace to start writing
+      navigate("/workspace");
+    } catch (e: any) {
+      setError(e.message || "生成大纲失败，请重试");
+      setGenerating(false);
+    }
   };
 
   return (
@@ -127,10 +145,11 @@ export function CreateProject() {
               <Button variant="outline" className="flex-1" onClick={() => setStep(2)}>
                 上一步
               </Button>
-              <Button className="flex-1" onClick={handleSubmit}>
-                开始创作
+              <Button className="flex-1" onClick={handleSubmit} disabled={generating}>
+                {generating ? "生成中..." : "开始创作"}
               </Button>
             </div>
+            {error && <p className="text-sm text-red-500 mt-2">{error}</p>}
           </div>
         )}
       </div>

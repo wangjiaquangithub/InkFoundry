@@ -15,6 +15,16 @@ export function Outline() {
     loadOutline();
   }, []);
 
+  // Auto-generate if no outline exists and we have pending project config
+  useEffect(() => {
+    if (loading || outline) return;
+    const config = localStorage.getItem("projectConfig");
+    if (!config) return;
+    // Already tried or currently generating
+    if (generating) return;
+    autoGenerate();
+  }, [loading, outline]);
+
   const loadOutline = async () => {
     setLoading(true);
     try {
@@ -27,18 +37,45 @@ export function Outline() {
     }
   };
 
+  const autoGenerate = async () => {
+    const configStr = localStorage.getItem("projectConfig");
+    if (!configStr) return;
+    const config = JSON.parse(configStr);
+
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await api.generateOutline({
+        genre: config.genre || "xuanhuan",
+        title: config.title || "未命名小说",
+        summary: config.summary || "",
+        total_chapters: config.totalChapters || 100,
+      });
+      setOutline(res.data.outline);
+      // Auto-navigate to workspace after successful generation
+      setTimeout(() => navigate("/workspace"), 1500);
+    } catch (e: any) {
+      setError(e.message || "生成大纲失败");
+      setGenerating(false);
+    }
+  };
+
   const handleGenerate = async () => {
     setGenerating(true);
     setError(null);
     try {
       const pending = JSON.parse(localStorage.getItem("pendingProject") || "{}");
+      const config = JSON.parse(localStorage.getItem("projectConfig") || "{}");
+      const merged = { ...config, ...pending };
       const res = await api.generateOutline({
-        genre: pending.genre || "xuanhuan",
-        title: pending.title || "Untitled",
-        summary: pending.summary || "",
-        total_chapters: pending.totalChapters || 100,
+        genre: merged.genre || "xuanhuan",
+        title: merged.title || "Untitled",
+        summary: merged.summary || "",
+        total_chapters: merged.totalChapters || 100,
       });
       setOutline(res.data.outline);
+      // Auto-navigate to workspace after successful generation
+      setTimeout(() => navigate("/workspace"), 1500);
     } catch (e: any) {
       setError(e.message || "生成大纲失败");
     } finally {
@@ -85,14 +122,27 @@ export function Outline() {
 
         {!outline ? (
           <div className="bg-white rounded-xl border p-12 text-center">
-            <div className="text-5xl mb-4">📝</div>
-            <h2 className="text-xl font-semibold mb-2">还没有大纲</h2>
-            <p className="text-gray-400 mb-6">
-              先生成你的小说大纲，AI 会根据题材和简介生成完整的故事结构
-            </p>
-            <Button onClick={handleGenerate} disabled={generating}>
-              {generating ? "生成中..." : "生成大纲"}
-            </Button>
+            {generating ? (
+              <>
+                <div className="text-5xl mb-4 animate-pulse">⚙️</div>
+                <h2 className="text-xl font-semibold mb-2">正在生成大纲...</h2>
+                <p className="text-gray-400 mb-6">
+                  AI 正在根据你的题材和简介生成完整的故事结构
+                </p>
+                <div className="text-sm text-blue-500">生成完成后将自动跳转到工作区</div>
+              </>
+            ) : (
+              <>
+                <div className="text-5xl mb-4">📝</div>
+                <h2 className="text-xl font-semibold mb-2">还没有大纲</h2>
+                <p className="text-gray-400 mb-6">
+                  先生成你的小说大纲，AI 会根据题材和简介生成完整的故事结构
+                </p>
+                <Button onClick={handleGenerate} disabled={generating}>
+                  {generating ? "生成中..." : "生成大纲"}
+                </Button>
+              </>
+            )}
           </div>
         ) : (
           <div className="space-y-6">
