@@ -31,11 +31,12 @@ class RedTeamAgent(BaseAgent):
             self._gateway = LLMGateway(self.model, self.api_key, self.base_url)
         return self._gateway
 
-    def run(self, draft: Dict[str, Any]) -> Dict[str, Any]:
+    def run(self, draft: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Attack the draft and report findings.
 
         Args:
-            draft: The draft content to attack.
+            draft: The draft content to attack (can be str or dict).
+            **kwargs: Additional context like chapter_num.
 
         Returns:
             Dict with 'attack' description of found issues.

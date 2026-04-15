@@ -37,16 +37,28 @@ class WriterAgent(BaseAgent):
 
         Args:
             task_card: Contains chapter number, tension level, hooks, etc.
+                       Or kwargs: chapter_num, task_card, chapter_summary.
 
         Returns:
             Draft text for the chapter.
         """
-        chapter = task_card.get("chapter", "?")
-        tension = task_card.get("tension_level", "normal")
-        task_type = task_card.get("type", "development")
+        # Support orchestrator-style kwargs
+        if isinstance(task_card, dict) and "chapter_num" in task_card and "task_card" in task_card:
+            chapter = task_card.get("chapter_num", "?")
+            tc = task_card.get("task_card", {})
+            chapter_summary = task_card.get("chapter_summary", "")
+            tension = tc.get("tension_level", "normal") if isinstance(tc, dict) else "normal"
+            task_type = tc.get("type", "development") if isinstance(tc, dict) else "development"
+        else:
+            chapter = task_card.get("chapter", "?")
+            tension = task_card.get("tension_level", "normal")
+            task_type = task_card.get("type", "development")
+            chapter_summary = ""
+
+        summary_prefix = f"\nOutline: {chapter_summary}" if chapter_summary else ""
         return (
-            f"Draft for Chapter {chapter} "
-            f"(tension: {tension}, type: {task_type})..."
+            f"Draft for Chapter {chapter}"
+            f" (tension: {tension}, type: {task_type})...{summary_prefix}"
         )
 
     async def arun(self, task_card: Dict[str, Any]) -> str:

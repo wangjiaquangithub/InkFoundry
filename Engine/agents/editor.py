@@ -31,11 +31,12 @@ class EditorAgent(BaseAgent):
             self._gateway = LLMGateway(self.model, self.api_key, self.base_url)
         return self._gateway
 
-    def run(self, draft: Dict[str, Any]) -> Dict[str, Any]:
+    def run(self, draft: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Review a draft and return score + issues.
 
         Args:
-            draft: The draft content to review.
+            draft: The draft content to review (can be str or dict).
+            **kwargs: Additional context like chapter_num.
 
         Returns:
             Dict with 'score' (int) and 'issues' (list of strings).

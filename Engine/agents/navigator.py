@@ -16,11 +16,50 @@ class NavigatorAgent(BaseAgent):
         """Run navigator logic - generate task card.
 
         Args:
-            context: Should contain chapter_num and history_tension.
+            context: Should contain chapter_num and history_tension,
+                     or chapter_num/total_chapters/chapter_summary/outline.
         """
+        # Support orchestrator-style kwargs
+        if "chapter_summary" in context or "outline" in context:
+            return self.generate_task_card_from_outline(
+                chapter_num=context.get("chapter_num", 1),
+                total_chapters=context.get("total_chapters", 100),
+                chapter_summary=context.get("chapter_summary", ""),
+                outline=context.get("outline"),
+            )
         chapter = context.get("chapter_num", 1)
         history = context.get("history_tension", [])
         return self.generate_task_card(chapter, history)
+
+    def generate_task_card_from_outline(
+        self,
+        chapter_num: int,
+        total_chapters: int,
+        chapter_summary: str = "",
+        outline=None,
+    ) -> Dict[str, Any]:
+        """Generate a task card based on outline context.
+
+        Args:
+            chapter_num: The chapter to generate a card for.
+            total_chapters: Total chapter count.
+            chapter_summary: One-line summary from outline.
+            outline: Outline model instance (optional).
+
+        Returns:
+            Task card dict.
+        """
+        tension = 5
+        if outline and chapter_num <= len(outline.tension_curve):
+            tension = outline.tension_curve[chapter_num - 1]
+
+        return {
+            "chapter_num": chapter_num,
+            "total_chapters": total_chapters,
+            "tension_level": tension,
+            "summary": chapter_summary,
+            "type": "high_conflict" if tension >= 7 else "development",
+        }
 
     def generate_task_card(
         self, chapter_num: int, history_tension: List[int]
