@@ -8,7 +8,7 @@ from Studio.api import create_app
 @pytest.fixture
 def client():
     """Provide a test client for the Studio API with lifespan events."""
-    app = create_app(seed_data=False)
+    app = create_app(seed_data=False, db_path=":memory:")
     with TestClient(app) as c:
         yield c
 
@@ -16,7 +16,7 @@ def client():
 @pytest.fixture
 def client_with_seed():
     """Provide a test client with seeded data."""
-    app = create_app(seed_data=True)
+    app = create_app(seed_data=True, db_path=":memory:")
     with TestClient(app) as c:
         yield c
 

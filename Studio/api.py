@@ -140,15 +140,20 @@ def _seed_sample_data(db: StateDB) -> None:
             db.update_character(char)
 
 
-def create_app(seed_data: bool = True) -> FastAPI:
-    """Create and configure the Studio FastAPI application."""
+def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
+    """Create and configure the Studio FastAPI application.
+
+    Args:
+        seed_data: Whether to seed sample data.
+        db_path: Database path. Defaults to env INKFOUNDRY_DB_PATH or 'state.db'.
+                 Use ':memory:' for testing.
+    """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Manage application lifecycle with proper resource cleanup."""
-        # Use persistent SQLite file instead of in-memory database
-        db_path = os.environ.get("INKFOUNDRY_DB_PATH", "state.db")
-        db = StateDB(db_path)
+        resolved_db_path = db_path if db_path is not None else os.environ.get("INKFOUNDRY_DB_PATH", "state.db")
+        db = StateDB(resolved_db_path)
         app.state.db = db
         if seed_data:
             _seed_sample_data(db)
