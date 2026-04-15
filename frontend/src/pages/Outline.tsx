@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { Button } from "../components/ui/button";
@@ -10,20 +10,47 @@ export function Outline() {
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     loadOutline();
+    return () => {
+      if (navTimerRef.current) clearTimeout(navTimerRef.current);
+    };
   }, []);
 
   // Auto-generate if no outline exists and we have pending project config
   useEffect(() => {
-    if (loading || outline) return;
-    const config = localStorage.getItem("projectConfig");
-    if (!config) return;
-    // Already tried or currently generating
-    if (generating) return;
-    autoGenerate();
-  }, [loading, outline]);
+    if (loading || outline || generating) return;
+    const configStr = localStorage.getItem("projectConfig");
+    if (!configStr) return;
+
+    let cancelled = false;
+    const doGenerate = async () => {
+      setGenerating(true);
+      setError(null);
+      try {
+        const config = JSON.parse(configStr || "{}");
+        const res = await api.generateOutline({
+          genre: config.genre || "xuanhuan",
+          title: config.title || "未命名小说",
+          summary: config.summary || "",
+          total_chapters: config.totalChapters || 100,
+        });
+        if (!cancelled) {
+          setOutline(res.data.outline);
+          navTimerRef.current = setTimeout(() => navigate("/workspace"), 1500);
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setError(e.message || "生成大纲失败");
+          setGenerating(false);
+        }
+      }
+    };
+    doGenerate();
+    return () => { cancelled = true; };
+  }, [loading, outline, generating]);
 
   const loadOutline = async () => {
     setLoading(true);
@@ -37,14 +64,11 @@ export function Outline() {
     }
   };
 
-  const autoGenerate = async () => {
-    const configStr = localStorage.getItem("projectConfig");
-    if (!configStr) return;
-    const config = JSON.parse(configStr);
-
+  const handleGenerate = async () => {
     setGenerating(true);
     setError(null);
     try {
+      const config = JSON.parse(localStorage.getItem("projectConfig") || "{}");
       const res = await api.generateOutline({
         genre: config.genre || "xuanhuan",
         title: config.title || "未命名小说",
@@ -52,30 +76,7 @@ export function Outline() {
         total_chapters: config.totalChapters || 100,
       });
       setOutline(res.data.outline);
-      // Auto-navigate to workspace after successful generation
-      setTimeout(() => navigate("/workspace"), 1500);
-    } catch (e: any) {
-      setError(e.message || "生成大纲失败");
-      setGenerating(false);
-    }
-  };
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    setError(null);
-    try {
-      const pending = JSON.parse(localStorage.getItem("pendingProject") || "{}");
-      const config = JSON.parse(localStorage.getItem("projectConfig") || "{}");
-      const merged = { ...config, ...pending };
-      const res = await api.generateOutline({
-        genre: merged.genre || "xuanhuan",
-        title: merged.title || "Untitled",
-        summary: merged.summary || "",
-        total_chapters: merged.totalChapters || 100,
-      });
-      setOutline(res.data.outline);
-      // Auto-navigate to workspace after successful generation
-      setTimeout(() => navigate("/workspace"), 1500);
+      navTimerRef.current = setTimeout(() => navigate("/workspace"), 1500);
     } catch (e: any) {
       setError(e.message || "生成大纲失败");
     } finally {

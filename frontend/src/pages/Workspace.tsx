@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useNovelStore } from "../store/novelStore";
 import { usePipelineStore } from "../stores/pipelineStore";
@@ -6,7 +6,7 @@ import { api } from "../api/client";
 import { Button } from "../components/ui/button";
 import { ChapterEditor } from "../components/ChapterEditor";
 import { PipelineStatusBar } from "../components/PipelineStatusBar";
-import type { Chapter, Outline } from "../types";
+import type { Outline } from "../types";
 
 const NAV_ITEMS = [
   { label: "工作台", path: "/workspace", icon: "📝" },
@@ -23,7 +23,7 @@ export function Workspace() {
   const {
     chapters, characters, selectedChapter,
     fetchStatus, fetchCharacters, fetchChapters,
-    selectChapter, updateChapter, generateChapter,
+    selectChapter,
   } = useNovelStore();
 
   const {
@@ -36,6 +36,7 @@ export function Workspace() {
   const [batchTo, setBatchTo] = useState(10);
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [outline, setOutline] = useState<Outline | null>(null);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     fetchStatus();
@@ -63,6 +64,13 @@ export function Workspace() {
     }, 2000);
     return () => clearInterval(interval);
   }, [running]);
+
+  // Cleanup batch poll interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    };
+  }, []);
 
   const hasChapters = chapters.length > 0;
   const selected = chapters.find((c) => c.chapter_num === selectedChapter);
@@ -102,17 +110,18 @@ export function Workspace() {
   }, [selected, fetchChapters]);
 
   const handleBatchRun = useCallback(async () => {
+    if (batchFrom < 1 || batchTo < batchFrom) return;
     try {
       await runBatch(batchFrom, batchTo);
       setShowBatchModal(false);
       // Poll for completion
-      const poll = setInterval(async () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = setInterval(async () => {
         await fetchPipelineStatus();
         await fetchChapters();
-        // Check if pipeline is still running
         const status = usePipelineStore.getState();
         if (!status.running) {
-          clearInterval(poll);
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
         }
       }, 2000);
     } catch (e: any) {
@@ -126,7 +135,6 @@ export function Workspace() {
       reviewed: "已审",
       draft: "草稿",
       pending: "待写",
-      reviewed: "已审",
     };
     return map[s] || s;
   };
