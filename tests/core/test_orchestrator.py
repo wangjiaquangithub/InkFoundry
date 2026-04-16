@@ -1,4 +1,5 @@
 """Tests for PipelineOrchestrator."""
+import asyncio
 import pytest
 
 from Engine.core.orchestrator import PipelineOrchestrator
@@ -28,7 +29,7 @@ def test_orchestrator_run_chapter_saves_result(db):
     db.save_outline(outline)
 
     orb = PipelineOrchestrator(state_db=db)
-    result = orb.run_chapter(chapter_num=1)
+    result = asyncio.run(orb.run_chapter(chapter_num=1))
 
     assert result is not None
     assert "status" in result
@@ -48,7 +49,7 @@ def test_orchestrator_run_chapter_publishes_events(db):
     db.save_outline(outline)
 
     orb = PipelineOrchestrator(state_db=db, event_bus=bus)
-    orb.run_chapter(chapter_num=1)
+    asyncio.run(orb.run_chapter(chapter_num=1))
 
     assert len(events) > 0
     # Should have at least a starting event
@@ -90,7 +91,7 @@ def test_orchestrator_run_batch(db):
     db.save_outline(outline)
 
     orb = PipelineOrchestrator(state_db=db)
-    results = orb.run_batch(start=1, end=3)
+    results = asyncio.run(orb.run_batch(start=1, end=3))
 
     assert 1 in results
     assert 2 in results

@@ -14,6 +14,10 @@ const NAV_ITEMS = [
   { label: "大纲", path: "/outline", icon: "📋" },
   { label: "章节", path: "/chapters", icon: "📚" },
   { label: "角色", path: "/characters", icon: "👥" },
+  { label: "档案", path: "/profiles", icon: "📝" },
+  { label: "关系", path: "/relationships", icon: "🔗" },
+  { label: "力量", path: "/powersystems", icon: "⚡" },
+  { label: "时间线", path: "/timeline", icon: "⏳" },
   { label: "世界观", path: "/world", icon: "🌍" },
   { label: "审核", path: "/review", icon: "✅" },
   { label: "设置", path: "/settings", icon: "⚙️" },
@@ -38,6 +42,10 @@ export function Workspace() {
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [outline, setOutline] = useState<Outline | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [projects, setProjects] = useState<{ id: string; title: string }[]>([]);
+  const [currentProjectId, setCurrentProjectId] = useState("");
 
   // WebSocket connection for real-time pipeline events
   const { connect: wsConnect, disconnect: wsDisconnect } = useWebSocket(
@@ -50,7 +58,38 @@ export function Workspace() {
     fetchChapters();
     fetchPipelineStatus();
     loadOutline();
+    loadProjects();
+    wsConnect();
+    return () => {
+      wsDisconnect();
+    };
   }, []);
+
+  const loadProjects = async () => {
+    try {
+      const res = await api.listProjects();
+      const list = res.data.projects || [];
+      setProjects(list);
+      if (list.length > 0) setCurrentProjectId(list[0].id);
+    } catch {
+      console.error("Failed to load projects");
+    }
+  };
+
+  const handleSwitchProject = async (id: string) => {
+    try {
+      await api.activateProject(id);
+      setCurrentProjectId(id);
+      // Refresh all data after switching
+      fetchStatus();
+      fetchCharacters();
+      fetchChapters();
+      loadOutline();
+    } catch (e: any) {
+      console.error("Failed to switch project:", e);
+      alert("切换项目失败");
+    }
+  };
 
   const loadOutline = async () => {
     try {
@@ -115,6 +154,28 @@ export function Workspace() {
     }
   }, [selected, fetchChapters]);
 
+  const handleExport = useCallback(async (format: string) => {
+    setExporting(true);
+    try {
+      const res = await api.exportNovel(format);
+      const blob = new Blob([res.data.content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = res.data.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setShowExportModal(false);
+    } catch (e: any) {
+      console.error("Failed to export:", e);
+      alert("导出失败，请确保已有章节内容");
+    } finally {
+      setExporting(false);
+    }
+  }, []);
+
   const handleBatchRun = useCallback(async () => {
     if (batchFrom < 1 || batchTo < batchFrom) return;
     try {
@@ -162,6 +223,19 @@ export function Workspace() {
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-bold">InkFoundry</h1>
           <span className="text-gray-300">|</span>
+          {/* Project Switcher */}
+          {projects.length > 0 && (
+            <select
+              value={currentProjectId}
+              onChange={(e) => handleSwitchProject(e.target.value)}
+              className="border rounded-md px-2 py-1 text-sm bg-white"
+            >
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.title}</option>
+              ))}
+            </select>
+          )}
+          <span className="text-gray-300">|</span>
           {/* Nav Items */}
           <nav className="flex gap-1">
             {NAV_ITEMS.map((item) => (
@@ -181,6 +255,10 @@ export function Workspace() {
           </nav>
         </div>
         <div className="flex items-center gap-2">
+          {/* Export Button */}
+          <Button variant="outline" size="sm" onClick={() => setShowExportModal(true)} disabled={!hasChapters}>
+            导出
+          </Button>
           {/* Batch Run Button */}
           <Button variant="outline" size="sm" onClick={() => setShowBatchModal(true)} disabled={!hasChapters && !outline}>
             批量生成
@@ -349,6 +427,34 @@ export function Workspace() {
           </div>
         </aside>
       </div>
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4">
+            <h3 className="text-lg font-bold mb-4">导出小说</h3>
+            <p className="text-sm text-gray-500 mb-4">选择导出格式：</p>
+            <div className="flex gap-3 mb-4">
+              {["txt", "md", "html"].map((fmt) => (
+                <Button
+                  key={fmt}
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => handleExport(fmt)}
+                  disabled={exporting}
+                >
+                  {fmt.toUpperCase()}
+                </Button>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" className="flex-1" onClick={() => setShowExportModal(false)}>
+                取消
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Batch Run Modal */}
       {showBatchModal && (

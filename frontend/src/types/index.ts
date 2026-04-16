@@ -93,21 +93,22 @@ export interface PipelineRunStatus {
   total_chapters: number;
 }
 
-export interface ReviewItem {
-  id: string;
-  chapter_num: number;
-  editor_score: number;
-  issues: string[];
-  redteam_issues: string[];
-  status: "pending" | "approved" | "rejected";
+export interface PowerSystem {
+  name: string;
+  levels: string[];
+  rules: string;
 }
 
-export interface ProjectInfo {
-  id: string;
-  title: string;
-  genre: string;
-  summary: string;
-  total_chapters: number;
-  created_at: string;
-  updated_at: string;
+export interface TimelineEvent {
+  year: number;
+  event: string;
+  impact: string;
+}
+
+export interface CharacterRelationship {
+  from_character: string;
+  to_character: string;
+  relationship_type: string;
+  description: string;
+  strength: number;
 }

@@ -8,6 +8,10 @@ import { Characters } from "./pages/Characters";
 import { WorldBuilder } from "./pages/WorldBuilder";
 import { Review } from "./pages/Review";
 import { Settings } from "./pages/Settings";
+import { Profiles } from "./pages/Profiles";
+import { Relationships } from "./pages/Relationships";
+import { PowerSystems } from "./pages/PowerSystems";
+import { Timeline } from "./pages/Timeline";
 
 function App() {
   return (
@@ -19,6 +23,10 @@ function App() {
         <Route path="/outline" element={<Outline />} />
         <Route path="/chapters" element={<Chapters />} />
         <Route path="/characters" element={<Characters />} />
+        <Route path="/profiles" element={<Profiles />} />
+        <Route path="/relationships" element={<Relationships />} />
+        <Route path="/powersystems" element={<PowerSystems />} />
+        <Route path="/timeline" element={<Timeline />} />
         <Route path="/world" element={<WorldBuilder />} />
         <Route path="/review" element={<Review />} />
         <Route path="/settings" element={<Settings />} />

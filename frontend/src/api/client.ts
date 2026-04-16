@@ -67,9 +67,47 @@ export const api = {
   // Configuration
   getConfig: () => client.get("/api/config"),
   saveConfig: (data: Record<string, any>) => client.post("/api/config", data),
+  resetConfig: () => client.delete("/api/config"),
+
+  // Power Systems
+  getPowerSystems: () => client.get("/api/power-systems"),
+  createPowerSystem: (data: { name: string; levels: string[]; rules: string }) =>
+    client.post("/api/power-systems", data),
+
+  // Timeline
+  getTimeline: () => client.get("/api/timeline"),
+  createTimelineEvent: (data: { year: number; event: string; impact: string }) =>
+    client.post("/api/timeline", data),
+
+  // Review
+  approveChapter: (num: number) => client.post(`/api/review/approve/${num}`),
+  rejectChapter: (num: number, note: string) =>
+    client.post(`/api/review/reject/${num}`, { note }),
 
   // State
   getStateSnapshot: () => client.get("/api/state/snapshot"),
+
+  // Export
+  exportNovel: (format: string) =>
+    client.post("/api/export", { format }),
+
+  // Projects
+  listProjects: () => client.get("/api/projects"),
+  createProject: (data: { title: string; genre?: string }) =>
+    client.post("/api/projects", data),
+  getProject: (id: string) => client.get(`/api/projects/${id}`),
+  deleteProject: (id: string) => client.delete(`/api/projects/${id}`),
+  activateProject: (id: string) => client.post(`/api/projects/${id}/activate`),
+
+  // Token Stats
+  getTokenStats: () => client.get("/api/token-stats"),
+  getTokenRecords: () => client.get("/api/token-records"),
+
+  // Snapshots
+  saveSnapshot: () => client.post("/api/snapshots"),
+  listSnapshots: () => client.get("/api/snapshots"),
+  restoreSnapshot: (version: number) => client.post(`/api/snapshots/${version}/restore`),
+  deleteSnapshot: (version: number) => client.delete(`/api/snapshots/${version}`),
 };
 
 export default api;

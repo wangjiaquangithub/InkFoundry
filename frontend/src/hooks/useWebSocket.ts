@@ -17,7 +17,6 @@ interface PipelineEvent {
 export function useWebSocket(url: string) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { fetchStatus, fetchChapters } = usePipelineStore.getState();
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -46,11 +45,9 @@ export function useWebSocket(url: string) {
             // Update pipeline store based on event
             if (data.status === "running") {
               store.fetchStatus();
-              usePipelineStore.getState().fetchChapters?.();
             } else if (data.step === "complete") {
               // Chapter completed, refresh
-              fetchChapters();
-              fetchStatus();
+              store.fetchStatus();
             }
           } else if (msg.type === "subscription_confirmed") {
             // Connection established
@@ -77,7 +74,9 @@ export function useWebSocket(url: string) {
       reconnectTimerRef.current = null;
     }
     if (wsRef.current) {
-      wsRef.current.send(JSON.stringify({ action: "unsubscribe" }));
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ action: "unsubscribe" }));
+      }
       wsRef.current.close();
       wsRef.current = null;
     }

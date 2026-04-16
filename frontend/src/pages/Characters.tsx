@@ -12,6 +12,9 @@ export function Characters() {
   const [newName, setNewName] = useState("");
   const [newRole, setNewRole] = useState("supporting");
   const [newStatus, setNewStatus] = useState("active");
+  const [editingName, setEditingName] = useState<string | null>(null);
+  const [editRole, setEditRole] = useState("");
+  const [editStatus, setEditStatus] = useState("");
 
   useEffect(() => {
     loadCharacters();
@@ -38,6 +41,22 @@ export function Characters() {
       loadCharacters();
     } catch (e: any) {
       console.error("Failed to create character:", e);
+    }
+  };
+
+  const startEdit = (ch: CharacterState) => {
+    setEditingName(ch.name);
+    setEditRole(ch.role);
+    setEditStatus(ch.status);
+  };
+
+  const handleSaveEdit = async (name: string) => {
+    try {
+      await api.updateCharacter(name, { role: editRole, status: editStatus });
+      setEditingName(null);
+      loadCharacters();
+    } catch (e: any) {
+      console.error("Failed to update character:", e);
     }
   };
 
@@ -160,15 +179,37 @@ export function Characters() {
                     </span>
                   </div>
                 </div>
-                <div className="mt-3 flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleDelete(ch.name)}
-                  >
-                    删除
-                  </Button>
-                </div>
+
+                {editingName === ch.name ? (
+                  <div className="mt-3 flex gap-2 items-center">
+                    <select
+                      value={editRole}
+                      onChange={(e) => setEditRole(e.target.value)}
+                      className="border rounded-lg px-2 py-1 text-sm"
+                    >
+                      <option value="protagonist">主角</option>
+                      <option value="antagonist">反派</option>
+                      <option value="love_interest">感情线</option>
+                      <option value="supporting">配角</option>
+                    </select>
+                    <select
+                      value={editStatus}
+                      onChange={(e) => setEditStatus(e.target.value)}
+                      className="border rounded-lg px-2 py-1 text-sm"
+                    >
+                      <option value="active">活跃</option>
+                      <option value="inactive">隐藏</option>
+                      <option value="deceased">死亡</option>
+                    </select>
+                    <Button size="sm" onClick={() => handleSaveEdit(ch.name)}>保存</Button>
+                    <Button variant="outline" size="sm" onClick={() => setEditingName(null)}>取消</Button>
+                  </div>
+                ) : (
+                  <div className="mt-3 flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => startEdit(ch)}>编辑</Button>
+                    <Button variant="outline" size="sm" onClick={() => handleDelete(ch.name)}>删除</Button>
+                  </div>
+                )}
               </div>
             ))
           )}

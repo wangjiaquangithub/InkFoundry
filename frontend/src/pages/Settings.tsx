@@ -3,11 +3,30 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { Button } from "../components/ui/button";
 
+interface TokenStats {
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  total_requests: number;
+  total_cost_estimate: number;
+  by_model: Record<string, number>;
+  by_task: Record<string, number>;
+}
+
+interface Snapshot {
+  version: number;
+  chapter_num: number;
+  created_at?: string;
+  characters: any[];
+  world_states: any[];
+}
+
 export function Settings() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [config, setConfig] = useState({
     llm_api_key: "",
     llm_base_url: "https://api.openai.com/v1",
@@ -22,8 +41,18 @@ export function Settings() {
     pipeline_parallel: false,
   });
 
+  // Token stats
+  const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
+  const [_tokenRecords, setTokenRecords] = useState<any[]>([]);
+
+  // Snapshots
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [restoring, setRestoring] = useState<number | null>(null);
+
   useEffect(() => {
     loadConfig();
+    loadTokenStats();
+    loadSnapshots();
   }, []);
 
   const loadConfig = async () => {
@@ -50,6 +79,50 @@ export function Settings() {
     }
   };
 
+  const loadTokenStats = async () => {
+    try {
+      const [statsRes, recordsRes] = await Promise.all([
+        api.getTokenStats(),
+        api.getTokenRecords(),
+      ]);
+      setTokenStats(statsRes.data);
+      setTokenRecords(recordsRes.data.records || []);
+    } catch {
+      console.error("Failed to load token stats");
+    }
+  };
+
+  const loadSnapshots = async () => {
+    try {
+      const res = await api.getStateSnapshot();
+      // Snapshots are currently not exposed via a separate list endpoint
+      // For now, we show the current version from the state snapshot
+      setSnapshots([{
+        version: res.data.version,
+        chapter_num: res.data.chapter_num,
+        characters: res.data.characters,
+        world_states: res.data.world_states,
+      }]);
+    } catch {
+      console.error("Failed to load snapshots");
+    }
+  };
+
+  const handleRestoreSnapshot = async (version: number) => {
+    if (!confirm(`确定要回滚到版本 ${version} 吗？当前状态将被覆盖。`)) return;
+    setRestoring(version);
+    try {
+      await api.restoreSnapshot(version);
+      alert("回滚成功");
+      loadSnapshots();
+    } catch (e: any) {
+      console.error("Failed to restore snapshot:", e);
+      alert("回滚失败");
+    } finally {
+      setRestoring(null);
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
@@ -61,6 +134,34 @@ export function Settings() {
       console.error("Failed to save config:", e);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!confirm("确定要重置所有配置吗？此操作将删除所有 API 密钥和模型设置。")) return;
+    setResetting(true);
+    try {
+      await api.resetConfig();
+      setConfig({
+        llm_api_key: "",
+        llm_base_url: "https://api.openai.com/v1",
+        default_model: "qwen-plus",
+        writer_model: "",
+        editor_model: "",
+        redteam_model: "",
+        navigator_model: "",
+        director_model: "",
+        review_mode: "strict",
+        max_retries: 3,
+        pipeline_parallel: false,
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e: any) {
+      console.error("Failed to reset config:", e);
+      alert("重置失败，请重试");
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -225,6 +326,88 @@ export function Settings() {
           </div>
         </div>
 
+        {/* Token Stats */}
+        {tokenStats && (
+          <div className="bg-white rounded-xl border p-6">
+            <h2 className="font-semibold mb-4">Token 统计</h2>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-xs text-gray-400 mb-1">总 Token</p>
+                <p className="text-xl font-bold">{tokenStats.total_tokens.toLocaleString()}</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-xs text-gray-400 mb-1">请求次数</p>
+                <p className="text-xl font-bold">{tokenStats.total_requests}</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-xs text-gray-400 mb-1">Prompt Tokens</p>
+                <p className="text-xl font-bold">{tokenStats.total_prompt_tokens.toLocaleString()}</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-xs text-gray-400 mb-1">预估费用 ($)</p>
+                <p className="text-xl font-bold">${tokenStats.total_cost_estimate.toFixed(6)}</p>
+              </div>
+            </div>
+            {/* By Model */}
+            {Object.keys(tokenStats.by_model).length > 0 && (
+              <div className="mb-4">
+                <h3 className="text-sm font-medium mb-2">各模型用量</h3>
+                <div className="space-y-2">
+                  {Object.entries(tokenStats.by_model).map(([model, tokens]) => (
+                    <div key={model} className="flex justify-between text-sm">
+                      <span>{model}</span>
+                      <span className="text-gray-500">{tokens.toLocaleString()} tokens</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* By Task */}
+            {Object.keys(tokenStats.by_task).length > 0 && (
+              <div>
+                <h3 className="text-sm font-medium mb-2">各任务用量</h3>
+                <div className="space-y-2">
+                  {Object.entries(tokenStats.by_task).map(([task, tokens]) => (
+                    <div key={task} className="flex justify-between text-sm">
+                      <span>{task}</span>
+                      <span className="text-gray-500">{tokens.toLocaleString()} tokens</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Snapshot Management */}
+        <div className="bg-white rounded-xl border p-6">
+          <h2 className="font-semibold mb-4">版本历史</h2>
+          {snapshots.length === 0 ? (
+            <p className="text-sm text-gray-400">暂无快照数据</p>
+          ) : (
+            <div className="space-y-2">
+              {snapshots.map((s) => (
+                <div key={s.version} className="flex justify-between items-center p-3 border rounded-lg">
+                  <div>
+                    <p className="font-medium">版本 {s.version}</p>
+                    <p className="text-xs text-gray-400">
+                      章节 {s.chapter_num} · {s.characters.length} 个角色
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleRestoreSnapshot(s.version)}
+                    disabled={restoring === s.version}
+                  >
+                    {restoring === s.version ? "回滚中..." : "回滚"}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Danger Zone */}
         <div className="bg-white rounded-xl border border-red-200 p-6">
           <h2 className="font-semibold mb-4 text-red-600">危险操作</h2>
@@ -238,14 +421,10 @@ export function Settings() {
                 variant="outline"
                 size="sm"
                 className="text-red-600 border-red-200"
-                onClick={() => {
-                  if (confirm("确定要重置所有数据吗？此操作不可撤销。")) {
-                    // TODO: Implement reset API
-                    alert("此功能尚未实现");
-                  }
-                }}
+                onClick={handleReset}
+                disabled={resetting}
               >
-                重置
+                {resetting ? "重置中..." : "重置配置"}
               </Button>
             </div>
           </div>

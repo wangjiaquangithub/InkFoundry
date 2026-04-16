@@ -17,16 +17,34 @@ export function Review() {
     setLoading(true);
     try {
       const res = await api.getChapters();
-      // Filter chapters that have review notes or are in draft/reviewed status
       const chapters = res.data.chapters || [];
       const reviewed = chapters.filter(
-        (ch: Chapter) => ch.review_notes || ch.status === "draft" || ch.status === "reviewed"
+        (ch: Chapter) => ch.review_notes || ch.status === "draft" || ch.status === "reviewed" || ch.status === "final"
       );
       setReviews(reviewed);
     } catch {
       setReviews([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleApprove = async (ch: Chapter) => {
+    try {
+      await api.approveChapter(ch.chapter_num);
+      loadReviews();
+    } catch (err: any) {
+      console.error("Failed to approve:", err);
+    }
+  };
+
+  const handleReject = async (ch: Chapter) => {
+    const note = prompt("请输入拒绝原因（可选）：");
+    try {
+      await api.rejectChapter(ch.chapter_num, note || "");
+      loadReviews();
+    } catch (err: any) {
+      console.error("Failed to reject:", err);
     }
   };
 
@@ -115,6 +133,18 @@ export function Review() {
                           </span>
                         )}
                       </div>
+                    </div>
+                    <div className="flex gap-2">
+                      {item.status !== "final" && (
+                        <Button size="sm" onClick={() => handleApprove(item)}>
+                          批准
+                        </Button>
+                      )}
+                      {item.status !== "final" && (
+                        <Button size="sm" variant="outline" onClick={() => handleReject(item)}>
+                          拒绝
+                        </Button>
+                      )}
                     </div>
                   </div>
 

@@ -1,18 +1,27 @@
-"""LLM API call wrapper with retry, timeout, and streaming support."""
+"""LLM API call wrapper with retry, timeout, streaming support, and token tracking."""
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from openai import AsyncOpenAI
 
 
 class LLMGateway:
-    def __init__(self, model: str, api_key: str, base_url: str):
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: str,
+        token_tracker: Optional[object] = None,  # TokenTracker
+        task_name: str = "",
+    ):
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
         self._client: AsyncOpenAI | None = None
+        self._token_tracker = token_tracker
+        self._task_name = task_name
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
@@ -41,6 +50,15 @@ class LLMGateway:
                 )
                 if stream:
                     return self._collect_stream(response)
+                # Record token usage
+                usage = getattr(response, "usage", None)
+                if usage and self._token_tracker:
+                    self._token_tracker.record(
+                        model=self.model,
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=usage.completion_tokens,
+                        task=self._task_name,
+                    )
                 return response.choices[0].message.content or ""
             except Exception as e:
                 if attempt == 4:
