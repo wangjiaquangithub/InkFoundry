@@ -11,7 +11,24 @@ interface Project {
   last_modified: string;
   db_path: string;
   status: string;
+  total_chapters?: number;
+  latest_chapter?: number;
 }
+
+const QUICK_ACTIONS = [
+  { label: "设置", icon: "⚙️", path: "/settings", desc: "API Key 与模型配置" },
+  { label: "Token 用量", icon: "📊", path: "/workspace", desc: "查看全局 Token 消耗" },
+];
+
+const GENRE_MAP: Record<string, string> = {
+  xuanhuan: "玄幻",
+  urban: "都市",
+  scifi: "科幻",
+  romance: "言情",
+  wuxia: "武侠",
+  historical: "历史",
+  mystery: "悬疑",
+};
 
 export function Projects() {
   const navigate = useNavigate();
@@ -29,8 +46,20 @@ export function Projects() {
   const loadProjects = async () => {
     setLoading(true);
     try {
-      const res = await api.listProjects();
-      setProjects(res.data.projects || []);
+      const [projRes, chapRes] = await Promise.all([
+        api.listProjects(),
+        api.getChapters().catch(() => ({ data: { chapters: [] } })),
+      ]);
+      const list = projRes.data.projects || [];
+      const chapters = chapRes.data.chapters || [];
+
+      // Enrich projects with chapter stats
+      const enriched = list.map((p: Project) => ({
+        ...p,
+        total_chapters: chapters.length,
+        latest_chapter: chapters.length > 0 ? Math.max(...chapters.map((c: any) => c.chapter_num)) : 0,
+      }));
+      setProjects(enriched);
     } catch {
       console.error("Failed to load projects");
     } finally {
@@ -85,25 +114,46 @@ export function Projects() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b px-6 py-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold">InkFoundry</h1>
+      {/* Global Header */}
+      <header className="bg-white border-b px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <h1 className="text-xl font-bold">InkFoundry</h1>
+          <nav className="flex gap-1">
+            {QUICK_ACTIONS.map((a) => (
+              <button
+                key={a.path}
+                onClick={() => a.path === "#projects" ? window.scrollTo({ top: 0, behavior: "smooth" }) : navigate(a.path)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm text-gray-600 hover:bg-gray-100 transition"
+              >
+                <span>{a.icon}</span>
+                <span>{a.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
         <Button size="sm" onClick={() => setShowCreate(true)}>
           + 创建项目
         </Button>
       </header>
 
       <div className="max-w-5xl mx-auto py-8 px-4">
+        {/* Hero */}
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold mb-2">我的项目</h1>
-          <p className="text-gray-500">管理和切换小说项目</p>
+          <h1 className="text-3xl font-bold mb-2">AI 小说创作工坊</h1>
+          <p className="text-gray-500">智能驱动，从大纲到完稿</p>
         </div>
 
         {/* Project List */}
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">我的项目</h2>
+          <span className="text-sm text-gray-400">{projects.length} 个项目</span>
+        </div>
+
         {projects.length === 0 ? (
-          <div className="text-center py-12">
+          <div className="text-center py-12 bg-white rounded-xl border">
             <div className="text-5xl mb-4">📝</div>
-            <p className="text-gray-500 mb-4">还没有项目</p>
+            <p className="text-gray-500 mb-1">还没有项目</p>
+            <p className="text-sm text-gray-400 mb-4">创建你的第一部小说开始创作</p>
             <Button onClick={() => setShowCreate(true)}>创建第一个项目</Button>
           </div>
         ) : (
@@ -115,7 +165,9 @@ export function Projects() {
               >
                 <h3 className="font-semibold text-lg mb-1">{p.title}</h3>
                 <p className="text-xs text-gray-400 mb-3">
-                  类型: {p.genre} · 创建: {new Date(p.created_at).toLocaleDateString("zh-CN")}
+                  {GENRE_MAP[p.genre] || p.genre}
+                  {p.total_chapters ? ` · ${p.total_chapters}章` : ""}
+                  {p.latest_chapter ? ` · 最新: 第${p.latest_chapter}章` : ""}
                 </p>
                 <div className="flex gap-2">
                   <Button
@@ -123,7 +175,7 @@ export function Projects() {
                     className="flex-1"
                     onClick={() => handleActivate(p.id)}
                   >
-                    进入项目
+                    进入创作
                   </Button>
                   <Button
                     variant="outline"
