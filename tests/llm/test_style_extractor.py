@@ -35,3 +35,58 @@ def test_generate_prompt():
     prompt = StyleExtractor.generate_prompt(profile, "武侠故事")
     assert "武侠故事" in prompt
     assert "平均句长" in prompt
+
+
+def test_extract_empty_text():
+    profile = StyleExtractor.extract("")
+    assert profile.avg_sentence_length == 0
+    assert profile.vocabulary_richness == 0
+    assert profile.tone == "casual"
+
+
+def test_extract_long_text():
+    text = "。".join(["他走了进来"] * 100) + "。"
+    profile = StyleExtractor.extract(text)
+    assert profile.avg_sentence_length > 0
+    assert profile.vocabulary_richness < 1.0  # repeated text
+
+
+def test_style_profile_consistency():
+    same_text = "他仿佛看到了未来。然而，尽管困难重重，他依然坚持。"
+    p1 = StyleExtractor.extract(same_text)
+    p2 = StyleExtractor.extract(same_text)
+    assert p1.avg_sentence_length == p2.avg_sentence_length
+    assert p1.tone == p2.tone
+
+
+def test_style_extractor_integration_via_api():
+    """Integration test: verify style extraction works via API endpoint."""
+    from fastapi.testclient import TestClient
+    from Studio.api import create_app
+
+    app = create_app(seed_data=False, db_path=":memory:")
+    with TestClient(app) as client:
+        response = client.post("/api/style/extract", json={
+            "text": "他走进了房间，仿佛回到了过去。",
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert "avg_sentence_length" in data
+        assert "tone" in data
+
+
+def test_style_fingerprint_via_api():
+    """Integration test: verify fingerprint generation via API endpoint."""
+    from fastapi.testclient import TestClient
+    from Studio.api import create_app
+
+    app = create_app(seed_data=False, db_path=":memory:")
+    with TestClient(app) as client:
+        response = client.post("/api/style/fingerprint", json={
+            "text": "他走进了房间。「你好」他问道。",
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert "fingerprint" in data
+        assert "style_profile" in data
+        assert "tone" in data["style_profile"]

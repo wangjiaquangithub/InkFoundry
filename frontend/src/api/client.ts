@@ -108,6 +108,33 @@ export const api = {
   listSnapshots: () => client.get("/api/snapshots"),
   restoreSnapshot: (version: number) => client.post(`/api/snapshots/${version}/restore`),
   deleteSnapshot: (version: number) => client.delete(`/api/snapshots/${version}`),
+
+  // Phase 3: Value-Add Features
+  // Daemon
+  getDaemonStatus: () => client.get("/api/daemon/status"),
+  startDaemon: (data: { start_chapter?: number; end_chapter?: number; interval_seconds?: number }) =>
+    client.post("/api/daemon/start", data),
+  stopDaemon: () => client.post("/api/daemon/stop"),
+
+  // Import
+  importText: (data: { title: string; content: string }) =>
+    client.post("/api/import/text", data),
+  importAndApply: (data: { title: string; content: string }) =>
+    client.post("/api/import/apply", data),
+
+  // Side Story
+  generateSideStory: (data: { characters?: string[]; setting?: string; topic?: string }) =>
+    client.post("/api/side-story/generate", data),
+
+  // Imitation
+  generateImitation: (data: { sample_text: string; topic: string }) =>
+    client.post("/api/imitation/generate", data),
+
+  // Style
+  extractStyle: (text: string) =>
+    client.post("/api/style/extract", { text }),
+  getStyleFingerprint: (text: string) =>
+    client.post("/api/style/fingerprint", { text }),
 };
 
 export default api;

@@ -125,6 +125,39 @@ class ConfigSave(BaseModel):
     pipeline_parallel: Optional[bool] = None
 
 
+# --- Phase 3 models ---
+
+class ImportTextRequest(BaseModel):
+    title: str = "Untitled"
+    content: str = ""
+
+
+class ImportApplyRequest(BaseModel):
+    title: str = "Untitled"
+    content: str = ""
+
+
+class SideStoryGenerate(BaseModel):
+    characters: List[str] = []
+    setting: str = ""
+    topic: str = ""
+
+
+class ImitationGenerate(BaseModel):
+    sample_text: str = ""
+    topic: str = ""
+
+
+class StyleExtractRequest(BaseModel):
+    text: str = ""
+
+
+class DaemonStartRequest(BaseModel):
+    start_chapter: int = 1
+    end_chapter: int = 10
+    interval_seconds: int = 60
+
+
 class PipelineManager:
     """Singleton that owns the running PipelineOrchestrator and its background task.
 
@@ -1175,6 +1208,171 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
             characters=[CharacterState.model_validate_json(r[0]).model_dump() for r in chars_cursor.fetchall()],
             world_states=[{"name": "default", "description": "", "state": "normal"}],
         )
+
+    # --- Phase 3: Value-Add Features ---
+
+    # --- Daemon API ---
+    _daemon_scheduler: Optional[Any] = None
+
+    @app.get("/api/daemon/status")
+    def daemon_status(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Get daemon status."""
+        nonlocal _daemon_scheduler
+        is_running = _daemon_scheduler is not None and getattr(_daemon_scheduler, "_running", False)
+        return {
+            "running": is_running,
+            "queue_size": getattr(_daemon_scheduler, "queue_size", 0) if is_running else 0,
+        }
+
+    @app.post("/api/daemon/start")
+    def daemon_start(body: DaemonStartRequest, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Start the background daemon for automatic chapter generation."""
+        nonlocal _daemon_scheduler
+        from Engine.core.daemon import DaemonScheduler
+
+        if _daemon_scheduler is None:
+            _daemon_scheduler = DaemonScheduler()
+            _daemon_scheduler.start()
+
+        # Add the generation task
+        _daemon_scheduler.add_task({
+            "start_chapter": body.start_chapter,
+            "end_chapter": body.end_chapter,
+            "interval": body.interval_seconds,
+        })
+
+        return {"started": True, "start_chapter": body.start_chapter, "end_chapter": body.end_chapter}
+
+    @app.post("/api/daemon/stop")
+    def daemon_stop() -> Dict[str, Any]:
+        """Stop the background daemon."""
+        nonlocal _daemon_scheduler
+        if _daemon_scheduler is not None:
+            _daemon_scheduler.stop()
+        return {"stopped": True}
+
+    # --- Import API ---
+    @app.post("/api/import/text")
+    def import_from_text(body: ImportTextRequest) -> Dict[str, Any]:
+        """Parse and preview imported novel from text."""
+        if not body.content.strip():
+            return {"title": body.title, "chapters": []}
+
+        from Engine.core.importer import NovelImporter
+        imported = NovelImporter.from_text(body.content, title=body.title)
+        return {
+            "title": imported.title,
+            "chapters": imported.chapters,
+            "chapter_count": imported.chapter_count,
+        }
+
+    @app.post("/api/import/apply")
+    def import_and_apply(body: ImportApplyRequest, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Import novel text and save chapters to StateDB."""
+        from Engine.core.importer import NovelImporter
+        from Engine.core.models import Chapter
+
+        imported = NovelImporter.from_text(body.content, title=body.title)
+        saved = 0
+        for ch_data in imported.chapters:
+            chapter = Chapter(
+                chapter_num=ch_data["number"],
+                title=f"Chapter {ch_data['number']}",
+                content=ch_data["content"],
+                status="imported",
+                word_count=len(ch_data["content"]),
+            )
+            db.update_chapter(chapter)
+            saved += 1
+
+        return {"imported": saved, "title": imported.title}
+
+    # --- Side Story API ---
+    @app.post("/api/side-story/generate")
+    def generate_side_story(body: SideStoryGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Generate a side story (番外) based on characters and setting."""
+        from Engine.agents.side_story import SideStoryAgent
+        config = _get_engine_config(db)
+
+        agent = SideStoryAgent(
+            model_name=config.role_models.get("writer", config.llm.default_model) if config else "dummy",
+            api_key=config.llm.api_key if config else "",
+            base_url=config.llm.base_url if config else "",
+        )
+
+        if config:
+            import asyncio
+            return {"content": asyncio.get_event_loop().run_until_complete(
+                agent.arun({"characters": body.characters, "setting": body.setting, "topic": body.topic})
+            )}
+
+        content = agent.run({
+            "characters": body.characters,
+            "setting": body.setting,
+            "topic": body.topic,
+        })
+        return {"content": content}
+
+    # --- Imitation API ---
+    @app.post("/api/imitation/generate")
+    def generate_imitation(body: ImitationGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Generate content imitating the style of a sample text."""
+        from Engine.agents.imitation import ImitationAgent
+        config = _get_engine_config(db)
+
+        agent = ImitationAgent(
+            model_name=config.role_models.get("writer", config.llm.default_model) if config else "dummy",
+            api_key=config.llm.api_key if config else "",
+            base_url=config.llm.base_url if config else "",
+        )
+
+        if config:
+            import asyncio
+            return {"content": asyncio.get_event_loop().run_until_complete(
+                agent.arun({"sample_text": body.sample_text, "topic": body.topic})
+            )}
+
+        content = agent.run({
+            "sample_text": body.sample_text,
+            "topic": body.topic,
+        })
+        return {"content": content}
+
+    # --- Style API ---
+    @app.post("/api/style/extract")
+    def extract_style(body: StyleExtractRequest) -> Dict[str, Any]:
+        """Extract style features from provided text."""
+        from Engine.llm.style_extractor import StyleExtractor
+
+        profile = StyleExtractor.extract(body.text)
+        return {
+            "avg_sentence_length": profile.avg_sentence_length,
+            "avg_paragraph_length": profile.avg_paragraph_length,
+            "vocabulary_richness": profile.vocabulary_richness,
+            "common_patterns": profile.common_patterns,
+            "tone": profile.tone,
+        }
+
+    @app.post("/api/style/fingerprint")
+    def style_fingerprint(body: StyleExtractRequest) -> Dict[str, Any]:
+        """Generate a style fingerprint for the provided text."""
+        from Engine.llm.style_extractor import StyleExtractor
+
+        profile = StyleExtractor.extract(body.text)
+        fingerprint = (
+            f"{profile.avg_sentence_length:.1f}_{profile.tone}_"
+            f"{'-'.join(profile.common_patterns[:3])}"
+        )
+        return {
+            "fingerprint": fingerprint,
+            "style_profile": {
+                "avg_sentence_length": profile.avg_sentence_length,
+                "avg_paragraph_length": profile.avg_paragraph_length,
+                "vocabulary_richness": profile.vocabulary_richness,
+                "common_patterns": profile.common_patterns,
+                "tone": profile.tone,
+            },
+        }
 
     # --- Static file serving for React SPA ---
     FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
