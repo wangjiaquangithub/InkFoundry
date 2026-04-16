@@ -39,18 +39,22 @@ class LLMGateway:
         stream: bool = False,
     ) -> str:
         client = self._get_client()
-        for attempt in range(5):
+        max_retries = 2
+        for attempt in range(max_retries + 1):
             try:
-                response = await client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=stream,
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                        timeout=10,
+                    ),
+                    timeout=15,
                 )
                 if stream:
                     return self._collect_stream(response)
-                # Record token usage
                 usage = getattr(response, "usage", None)
                 if usage and self._token_tracker:
                     self._token_tracker.record(
@@ -61,9 +65,9 @@ class LLMGateway:
                     )
                 return response.choices[0].message.content or ""
             except Exception as e:
-                if attempt == 4:
+                if attempt == max_retries:
                     raise
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(1)
         return ""
 
     async def chat_stream(self, messages: list[dict]) -> AsyncIterator[str]:

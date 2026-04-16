@@ -1,38 +1,278 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { Workspace } from "./pages/Workspace";
-import { CreateProject } from "./pages/CreateProject";
+import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { AppContext, loadStoredCurrentBook, saveCurrentBook, useAppContext, type BookInfo } from "./app-context";
+import { api } from "./api/client";
 import { Projects } from "./pages/Projects";
 import { Outline } from "./pages/Outline";
 import { Chapters } from "./pages/Chapters";
 import { Characters } from "./pages/Characters";
 import { WorldBuilder } from "./pages/WorldBuilder";
-import { Review } from "./pages/Review";
 import { Settings } from "./pages/Settings";
-import { Profiles } from "./pages/Profiles";
-import { Relationships } from "./pages/Relationships";
-import { PowerSystems } from "./pages/PowerSystems";
-import { Timeline } from "./pages/Timeline";
+import { Tokens } from "./pages/Tokens";
+import { StyleAnalysis } from "./pages/StyleAnalysis";
+import { AIDetection } from "./pages/AIDetection";
+import { TrendIntelligence } from "./pages/TrendIntelligence";
+
+interface NavItem {
+  path: string;
+  label: string;
+  icon: string;
+  bookRequired?: boolean;
+}
+
+function Sidebar() {
+  const location = useLocation();
+  const { currentBook } = useAppContext();
+
+  const bookNavItems: NavItem[] = [
+    { path: "/outline", label: "大纲", icon: "📋", bookRequired: true },
+    { path: "/chapters", label: "章节", icon: "📚", bookRequired: true },
+    { path: "/characters", label: "角色", icon: "👥", bookRequired: true },
+    { path: "/world", label: "世界观", icon: "🌍", bookRequired: true },
+    { path: "/style", label: "风格分析", icon: "🎨", bookRequired: true },
+    { path: "/ai-detect", label: "AI检测", icon: "🔍", bookRequired: true },
+    { path: "/tokens", label: "Token 用量", icon: "📊", bookRequired: true },
+    { path: "/settings", label: "设置", icon: "⚙️", bookRequired: true },
+  ];
+
+  const systemNavItems: NavItem[] = [
+    { path: "/", label: "书籍管理", icon: "📖" },
+    { path: "/trends", label: "趋势洞察", icon: "📈" },
+  ];
+
+  const navClass = (path: string) => {
+    const isActive = location.pathname === path;
+    const item = [...bookNavItems, ...systemNavItems].find((i) => i.path === path);
+    if (isActive) return "bg-blue-50 text-blue-700 font-medium";
+    if (item?.bookRequired && !currentBook) return "text-gray-300 cursor-not-allowed";
+    return "text-gray-600 hover:bg-gray-100";
+  };
+
+  const handleNav = (path: string) => (e: React.MouseEvent) => {
+    const item = [...bookNavItems, ...systemNavItems].find((i) => i.path === path);
+    if (item?.bookRequired && !currentBook) {
+      e.preventDefault();
+    }
+  };
+
+  return (
+    <aside className="w-52 bg-white border-r flex flex-col">
+      {/* App title */}
+      <div className="px-4 py-4 border-b">
+        <h1 className="text-lg font-bold text-gray-800">InkFoundry</h1>
+      </div>
+
+      <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
+        {/* System menu */}
+        {systemNavItems.map((item) => (
+          <Link
+            key={item.path}
+            to={item.path}
+            className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition ${navClass(item.path)}`}
+          >
+            <span>{item.icon}</span>
+            <span>{item.label}</span>
+          </Link>
+        ))}
+
+        {/* Divider + Book menu - only shown when a book is selected */}
+        {currentBook && (
+          <>
+            <div className="border-t my-2" />
+            <div className="px-3 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+              {currentBook.title}
+            </div>
+            {bookNavItems.map((item) => (
+              <Link
+                key={item.path}
+                to={item.path}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition ${navClass(item.path)}`}
+                onClick={handleNav(item.path)}
+              >
+                <span>{item.icon}</span>
+                <span>{item.label}</span>
+              </Link>
+            ))}
+          </>
+        )}
+      </nav>
+    </aside>
+  );
+}
+
+function AppLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex h-screen bg-gray-50">
+      <Sidebar />
+      <main className="flex-1 overflow-hidden">{children}</main>
+    </div>
+  );
+}
+
+// Guard: redirects to home if no book is selected
+function BookGuard({ children }: { children: ReactNode }) {
+  const { currentBook, isRestoringBook } = useAppContext();
+
+  if (isRestoringBook) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <p className="text-gray-400">正在恢复项目上下文...</p>
+      </div>
+    );
+  }
+
+  if (!currentBook) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
 
 function App() {
+  const [initialBook] = useState<BookInfo | null>(() => loadStoredCurrentBook());
+  const [currentBook, setCurrentBookState] = useState<BookInfo | null>(initialBook);
+  const [isRestoringBook, setIsRestoringBook] = useState(Boolean(initialBook));
+
+  const setCurrentBook = useCallback((book: BookInfo | null) => {
+    setCurrentBookState(book);
+    saveCurrentBook(book);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreProjectContext = async () => {
+      if (!initialBook) {
+        setIsRestoringBook(false);
+        return;
+      }
+
+      try {
+        const res = await api.getProject(initialBook.id);
+        const project = res.data.project as BookInfo;
+        await api.activateProject(project.id);
+        if (!cancelled) {
+          setCurrentBook({ id: project.id, title: project.title, genre: project.genre });
+        }
+      } catch {
+        if (!cancelled) {
+          setCurrentBook(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsRestoringBook(false);
+        }
+      }
+    };
+
+    void restoreProjectContext();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialBook, setCurrentBook]);
+
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Projects />} />
-        <Route path="/create" element={<CreateProject />} />
-        <Route path="/workspace" element={<Workspace />} />
-        <Route path="/outline" element={<Outline />} />
-        <Route path="/chapters" element={<Chapters />} />
-        <Route path="/characters" element={<Characters />} />
-        <Route path="/profiles" element={<Profiles />} />
-        <Route path="/relationships" element={<Relationships />} />
-        <Route path="/powersystems" element={<PowerSystems />} />
-        <Route path="/timeline" element={<Timeline />} />
-        <Route path="/world" element={<WorldBuilder />} />
-        <Route path="/review" element={<Review />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <AppContext.Provider value={{ currentBook, setCurrentBook, isRestoringBook }}>
+      <BrowserRouter>
+        <Routes>
+          <Route
+            path="/"
+            element={
+              <AppLayout>
+                <Projects />
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/tokens"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <Tokens />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/outline"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <Outline />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/chapters"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <Chapters />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/characters"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <Characters />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/world"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <WorldBuilder />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <Settings />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/trends"
+            element={
+              <AppLayout>
+                <TrendIntelligence />
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/style"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <StyleAnalysis />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/ai-detect"
+            element={
+              <AppLayout>
+                <BookGuard>
+                  <AIDetection />
+                </BookGuard>
+              </AppLayout>
+            }
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </AppContext.Provider>
   );
 }
 

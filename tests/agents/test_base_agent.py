@@ -8,7 +8,7 @@ def test_base_agent_init():
     assert agent.model == "test_model"
     assert agent.system_prompt == "test prompt"
     assert agent.api_key == ""
-    assert agent.base_url == "https://api.openai.com/v1"
+    assert agent.base_url == "https://coding.dashscope.aliyuncs.com/v1"
 
 
 def test_base_agent_init_with_credentials():
@@ -40,12 +40,12 @@ def test_base_agent_from_router_info():
     """Test creating agent from ModelInfo dict."""
     agent = BaseAgent.from_router_info(
         {
-            "model": "qwen-plus",
+            "model": "qwen3.6-plus",
             "api_key": "key",
             "base_url": "https://example.com/v1",
         },
         system_prompt="Write novel.",
     )
-    assert agent.model == "qwen-plus"
+    assert agent.model == "qwen3.6-plus"
     assert agent.api_key == "key"
     assert agent.base_url == "https://example.com/v1"

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAppContext } from "../app-context";
 import { api } from "../api/client";
 import { Button } from "../components/ui/button";
 
@@ -15,11 +16,6 @@ interface Project {
   latest_chapter?: number;
 }
 
-const QUICK_ACTIONS = [
-  { label: "设置", icon: "⚙️", path: "/settings", desc: "API Key 与模型配置" },
-  { label: "Token 用量", icon: "📊", path: "/workspace", desc: "查看全局 Token 消耗" },
-];
-
 const GENRE_MAP: Record<string, string> = {
   xuanhuan: "玄幻",
   urban: "都市",
@@ -32,6 +28,7 @@ const GENRE_MAP: Record<string, string> = {
 
 export function Projects() {
   const navigate = useNavigate();
+  const { currentBook, setCurrentBook, isRestoringBook } = useAppContext();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -40,26 +37,18 @@ export function Projects() {
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    loadProjects();
+    void loadProjects();
   }, []);
 
   const loadProjects = async () => {
     setLoading(true);
     try {
-      const [projRes, chapRes] = await Promise.all([
-        api.listProjects(),
-        api.getChapters().catch(() => ({ data: { chapters: [] } })),
-      ]);
+      const projRes = await api.listProjects();
       const list = projRes.data.projects || [];
-      const chapters = chapRes.data.chapters || [];
 
-      // Enrich projects with chapter stats
-      const enriched = list.map((p: Project) => ({
-        ...p,
-        total_chapters: chapters.length,
-        latest_chapter: chapters.length > 0 ? Math.max(...chapters.map((c: any) => c.chapter_num)) : 0,
-      }));
-      setProjects(enriched);
+      // Each project's chapter count is stored in its own state.db
+      // The listProjects endpoint already returns total_chapters if available
+      setProjects(list);
     } catch {
       console.error("Failed to load projects");
     } finally {
@@ -67,15 +56,27 @@ export function Projects() {
     }
   };
 
+  const activateProject = async (project: Pick<Project, "id" | "title" | "genre">) => {
+    if (isRestoringBook) {
+      return;
+    }
+
+    await api.activateProject(project.id);
+    setCurrentBook({ id: project.id, title: project.title, genre: project.genre });
+  };
+
   const handleCreate = async () => {
     if (!newTitle.trim()) return;
     setCreating(true);
     try {
-      await api.createProject({ title: newTitle, genre: newGenre });
+      const createRes = await api.createProject({ title: newTitle, genre: newGenre });
+      const project = createRes.data.project as Pick<Project, "id" | "title" | "genre">;
+      await activateProject(project);
       setShowCreate(false);
       setNewTitle("");
-      await loadProjects();
-    } catch (e: any) {
+      setNewGenre("xuanhuan");
+      navigate("/outline");
+    } catch (e: unknown) {
       console.error("Failed to create project:", e);
       alert("创建失败，请重试");
     } finally {
@@ -85,9 +86,13 @@ export function Projects() {
 
   const handleActivate = async (id: string) => {
     try {
-      await api.activateProject(id);
-      navigate("/workspace");
-    } catch (e: any) {
+      const project = projects.find((p) => p.id === id);
+      if (!project) {
+        throw new Error("Project not found");
+      }
+      await activateProject(project);
+      navigate("/outline");
+    } catch (e: unknown) {
       console.error("Failed to activate project:", e);
       alert("切换项目失败");
     }
@@ -97,102 +102,76 @@ export function Projects() {
     if (!confirm("确定要删除此项目吗？数据将无法恢复。")) return;
     try {
       await api.deleteProject(id);
+      if (currentBook?.id === id) {
+        setCurrentBook(null);
+        navigate("/");
+      }
       await loadProjects();
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Failed to delete project:", e);
       alert("删除失败，请重试");
     }
   };
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-gray-400">加载项目中...</p>
-      </div>
-    );
+    return <div className="flex items-center justify-center h-full"><p className="text-gray-400">加载项目中...</p></div>;
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Global Header */}
-      <header className="bg-white border-b px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <h1 className="text-xl font-bold">InkFoundry</h1>
-          <nav className="flex gap-1">
-            {QUICK_ACTIONS.map((a) => (
-              <button
-                key={a.path}
-                onClick={() => a.path === "#projects" ? window.scrollTo({ top: 0, behavior: "smooth" }) : navigate(a.path)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm text-gray-600 hover:bg-gray-100 transition"
-              >
-                <span>{a.icon}</span>
-                <span>{a.label}</span>
-              </button>
-            ))}
-          </nav>
+    <div className="h-full overflow-auto p-6">
+      {/* Page header */}
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h2 className="text-xl font-bold">书籍管理</h2>
+          <p className="text-sm text-gray-400 mt-1">管理你的 AI 小说创作项目</p>
         </div>
-        <Button size="sm" onClick={() => setShowCreate(true)}>
-          + 创建项目
-        </Button>
-      </header>
-
-      <div className="max-w-5xl mx-auto py-8 px-4">
-        {/* Hero */}
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold mb-2">AI 小说创作工坊</h1>
-          <p className="text-gray-500">智能驱动，从大纲到完稿</p>
-        </div>
-
-        {/* Project List */}
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">我的项目</h2>
-          <span className="text-sm text-gray-400">{projects.length} 个项目</span>
-        </div>
-
-        {projects.length === 0 ? (
-          <div className="text-center py-12 bg-white rounded-xl border">
-            <div className="text-5xl mb-4">📝</div>
-            <p className="text-gray-500 mb-1">还没有项目</p>
-            <p className="text-sm text-gray-400 mb-4">创建你的第一部小说开始创作</p>
-            <Button onClick={() => setShowCreate(true)}>创建第一个项目</Button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {projects.map((p) => (
-              <div
-                key={p.id}
-                className="bg-white rounded-xl border p-5 hover:shadow-md transition"
-              >
-                <h3 className="font-semibold text-lg mb-1">{p.title}</h3>
-                <p className="text-xs text-gray-400 mb-3">
-                  {GENRE_MAP[p.genre] || p.genre}
-                  {p.total_chapters ? ` · ${p.total_chapters}章` : ""}
-                  {p.latest_chapter ? ` · 最新: 第${p.latest_chapter}章` : ""}
-                </p>
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    className="flex-1"
-                    onClick={() => handleActivate(p.id)}
-                  >
-                    进入创作
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-red-600"
-                    onClick={() => handleDelete(p.id)}
-                  >
-                    删除
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        <Button onClick={() => setShowCreate(true)} disabled={isRestoringBook}>+ 创建项目</Button>
       </div>
 
-      {/* Create Project Modal */}
+      {projects.length === 0 ? (
+        <div className="bg-white rounded-xl border p-12 text-center max-w-md mx-auto">
+          <div className="text-5xl mb-4">📝</div>
+          <p className="text-gray-500 mb-1">还没有项目</p>
+          <p className="text-sm text-gray-400 mb-4">创建你的第一部小说开始创作</p>
+          <Button onClick={() => setShowCreate(true)}>创建第一个项目</Button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {projects.map((p) => (
+            <div
+              key={p.id}
+              className="bg-white rounded-xl border p-5 hover:shadow-md transition"
+            >
+              <h3 className="font-semibold text-lg mb-1">{p.title}</h3>
+              <p className="text-xs text-gray-400 mb-3">
+                {GENRE_MAP[p.genre] || p.genre}
+                {p.total_chapters ? ` · ${p.total_chapters}章` : ""}
+                {p.latest_chapter ? ` · 最新: 第${p.latest_chapter}章` : ""}
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => handleActivate(p.id)}
+                  disabled={isRestoringBook}
+                >
+                  {isRestoringBook ? "恢复中..." : "进入创作"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-red-600"
+                  onClick={() => handleDelete(p.id)}
+                >
+                  删除
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Create Modal */}
       {showCreate && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4">

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict
 
 from Engine.agents.base import BaseAgent
+from Engine.config import DEFAULT_LLM_BASE_URL
 
 if TYPE_CHECKING:
     from Engine.llm.gateway import LLMGateway
@@ -17,7 +18,7 @@ class EditorAgent(BaseAgent):
         model_name: str,
         system_prompt: str = "",
         api_key: str = "",
-        base_url: str = "https://api.openai.com/v1",
+        base_url: str = DEFAULT_LLM_BASE_URL,
         gateway: LLMGateway | None = None,
     ):
         super().__init__(model_name, system_prompt, api_key, base_url)

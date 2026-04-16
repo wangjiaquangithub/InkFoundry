@@ -6,15 +6,15 @@ from Engine.core.token_tracker import TokenTracker
 
 def test_record_token_usage():
     tracker = TokenTracker()
-    tracker.record("qwen-plus", 1000, 500, "writer_chapter_1")
+    tracker.record("qwen3.6-plus", 1000, 500, "writer_chapter_1")
     assert tracker.stats.total_requests == 1
     assert tracker.stats.total_tokens == 1500
 
 
 def test_stats_aggregation():
     tracker = TokenTracker()
-    tracker.record("qwen-plus", 1000, 500, "task_a")
-    tracker.record("qwen-plus", 2000, 800, "task_b")
+    tracker.record("qwen3.6-plus", 1000, 500, "task_a")
+    tracker.record("qwen3.6-plus", 2000, 800, "task_b")
     tracker.record("claude-sonnet", 500, 300, "task_a")
 
     assert tracker.stats.total_requests == 3

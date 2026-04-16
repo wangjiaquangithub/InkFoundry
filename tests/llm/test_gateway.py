@@ -7,8 +7,8 @@ from Engine.llm.gateway import LLMGateway
 
 
 def test_gateway_init():
-    gw = LLMGateway(model="qwen-plus", api_key="test-key", base_url="https://example.com/v1")
-    assert gw.model == "qwen-plus"
+    gw = LLMGateway(model="qwen3.6-plus", api_key="test-key", base_url="https://example.com/v1")
+    assert gw.model == "qwen3.6-plus"
     assert gw.api_key == "test-key"
     assert gw.base_url == "https://example.com/v1"
 

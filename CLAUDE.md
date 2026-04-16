@@ -2,150 +2,162 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## Overview
 
-**InkFoundry** is a "Narrative OS" — a dual-layer system for AI-assisted long-form novel generation. It combines an **Execution Engine** (Python) with a **Studio** (FastAPI backend for UI dashboard).
+InkFoundry is a long-form novel generation system with three practical layers:
 
-**Core problems solved**: "logic collapse", "AI flavor", "context amnesia", and "system deadlock" in mass-producing long-form novels.
+- **Engine** (`Engine/`) — domain logic, persistence, orchestration, agents, LLM wrappers, import/export.
+- **Studio API** (`Studio/api.py`) — the FastAPI backend, WebSocket endpoint, and effective BFF for the frontend.
+- **Frontend** (`frontend/`) — a React + Vite SPA that mostly wraps backend endpoints into page-level tools.
 
-**Architecture reference**: `Architecture_V3.md` (v3.2 blueprint)
+`README.md` and `Architecture_V3.md` describe the intended blueprint. When they conflict with the code, trust the **current implementation**.
 
-## Tech Stack
+## Common commands
 
-- **Python** 3.10+ (tested on 3.14)
-- **SQLite** — StateDB with atomic locks, version-based optimistic concurrency, snapshot management
-- **Pydantic** — data models (CharacterState, WorldState, StateSnapshot)
-- **pytest** — test framework with coverage
-- **FastAPI** — Studio REST API
-- **MCP** (Python SDK) — protocol for exposing StateDB
-- **PyYAML** — voice profile configuration
-- **ChromaDB** — planned (MemoryBank currently uses in-memory placeholder)
-
-## Project Structure
-
-```
-InkFoundry/
-├── Engine/
-│   ├── core/
-│   │   ├── models.py          # Pydantic: CharacterState, WorldState, StateSnapshot
-│   │   ├── state_db.py        # SQLite StateDB: CRUD, atomic locks, snapshots
-│   │   ├── filter.py          # State-Over-Vector Filter (StateDB > RAG)
-│   │   ├── controller.py      # Pipeline Controller: retry, circuit breaker
-│   │   ├── memory_bank.py     # Vector memory (ChromaDB placeholder)
-│   │   └── mcp_server.py      # MCP server exposing StateDB
-│   ├── agents/
-│   │   ├── base.py            # BaseAgent interface (run() abstract)
-│   │   ├── writer.py          # Draft generation from Task Cards
-│   │   ├── editor.py          # Logic & style review
-│   │   ├── redteam.py         # Adversarial plot attack
-│   │   ├── navigator.py       # Task Cards with tension heatmap
-│   │   ├── director.py        # Role-play sandbox loop detection
-│   │   └── voice_sandbox.py   # Character voice profile injection
-│   ├── configs/voices/
-│   │   └── default.yaml       # Default voice config
-│   ├── config.py              # EngineConfig: env var loader
-│   └── utils/
-│       └── router.py          # Hierarchical model router
-├── Studio/
-│   └── api.py                 # FastAPI REST API (status, characters CRUD)
-├── tests/
-│   ├── conftest.py            # Shared fixtures (db_instance)
-│   ├── core/                  # 6 test files: models, state_db, filter, controller, memory_bank, mcp
-│   ├── agents/                # 7 test files: base, writer, editor, redteam, navigator, director, voice
-│   ├── utils/                 # router tests
-│   ├── studio/                # API tests
-│   └── test_integration.py    # Full pipeline end-to-end tests
-├── docs/
-│   ├── implementation_plan.md # Task-by-task plan
-│   ├── CONTRIBUTING.md        # Development guide
-│   ├── plans/                 # Superpowers planning docs
-│   └── superpowers/           # Superpowers skill outputs
-├── .env.example               # Environment variable template
-├── Architecture_V3.md         # System architecture v3.2
-├── PROGRESS.log               # Build progress tracker
-└── requirements.txt
-```
-
-## Key Architecture Concepts
-
-### StateDB (Single Source of Truth)
-- SQLite-backed with 4 tables: `state` (generic KV), `characters`, `world_states`, `snapshots`
-- Thread-safe via `threading.Lock` with atomic lock IDs for concurrent agent safety
-- Optimistic concurrency via version field (`expected_version` parameter)
-- Full snapshot save/load/list for rollback support
-- Lifecycle management: `close()` invalidates connection, operations after close raise `RuntimeError`
-
-### State-Over-Vector Filter
-- RAG results from MemoryBank pass through `StateFilter` before context injection
-- `apply(rag_context)` — blocks entries for deceased/inactive characters in StateDB
-- `check_conflict(state_db_data, rag_data)` — detects key-level conflicts between sources
-- StateDB always wins over RAG recall (hard truth filter)
-
-### Pipeline Controller
-- `execute_with_retry(task_func, *args)` — retry loop with configurable `max_retries`
-- `CircuitBreakerError` raised when retries exhausted
-- `graceful_degradation=True` returns fallback dict instead of raising on final attempt
-
-### Gradient Rewrite Protocol (planned)
-- Retry 1: Localized patch (single paragraph)
-- Retry 2: Re-context with State_Snapshot
-- Retry 3: Pivot strategy (plot change proposal)
-
-### Review Policies (planned)
-- **Strict**: User approves every chapter
-- **Milestone**: AI runs autonomously, interrupts on logic branches
-- **Headless**: Fire-and-forget
-
-### Hierarchical Model Router
-- L1: Global default model (e.g., `qwen-plus`)
-- L2: Agent-specific overrides
-- L3: Task-level overrides (e.g., climax chapters use `claude-opus`)
-
-## Development Commands
+### Setup
 
 ```bash
-# Run all tests
-pytest
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-# Run specific test file
-pytest tests/core/test_state_db.py -v
+### Backend
 
-# Run single test
-pytest tests/core/test_state_db.py::test_update_and_retrieve_character -v
-
-# Run with coverage
-pytest --cov=Engine --cov-report=term-missing
-
-# Run integration tests only
-pytest tests/test_integration.py -v
-
-# Start Studio API (when ready)
+```bash
 uvicorn Studio.api:app --reload
 ```
 
-## Current State
+### Frontend
 
-**All 4 phases complete** — 73 tests passing, 95% coverage.
+```bash
+cd frontend
+npm install
+npm run dev
+npm run build
+npm run lint
+```
 
-### Completed
-- **Phase 0**: Core Infrastructure (StateDB, Filter, Controller, Models)
-- **Phase 1**: Agent Implementation (Writer, Editor, RedTeam, Navigator, Director)
-- **Phase 2**: Advanced Features (MemoryBank, Voice Sandbox, Model Router)
-- **Phase 3**: Studio Integration (MCP Server, FastAPI API, Integration Tests)
-- **Phase 4**: Configuration System (EngineConfig, API key wiring, `.env.example`)
+Vite proxies `/api`, `/health`, `/status`, and `/ws` to `localhost:8000` via `frontend/vite.config.ts`.
 
-### Planned/Placeholder
-- ChromaDB integration (MemoryBank uses in-memory list)
-- LLM API integration in agents (currently return static/mock responses)
-- Watchdog timeout in Controller
-- Review Policy Manager
-- Studio UI frontend
-- Director loop detection (simplified — only checks history length)
+### Tests
 
-## Rules
+Use `python3 -m pytest` instead of assuming `pytest` is on PATH.
 
-- **TDD is mandatory**: Write tests first (RED), implement (GREEN), refactor (IMPROVE)
-- **80% minimum test coverage** required
-- **Code review** required after writing code — use `code-reviewer` agent
-- Follow immutability patterns (create new objects, don't mutate existing ones)
-- No hardcoded secrets — use environment variables
+```bash
+python3 -m pytest
+python3 -m pytest tests/studio/test_api.py -q
+python3 -m pytest tests/studio/test_api.py::test_generate_outline -q
+python3 -m pytest tests/core/test_state_db.py -q
+python3 -m pytest --cov=Engine --cov-report=term-missing
+```
+
+## Architecture that matters in practice
+
+### `StateDB` is the center of the system
+
+Start here for most backend work:
+
+- `Engine/core/models.py`
+- `Engine/core/state_db.py`
+- `Studio/api.py`
+
+`StateDB` is not just a small state store; it owns most persisted novel data: chapters, outlines, characters, profiles, relationships, world-building data, snapshots, and config-adjacent state.
+
+### Chapter generation is orchestrated in one place
+
+`Engine/core/orchestrator.py` is the main execution path.
+
+Current flow:
+
+- Navigator creates a task card
+- MemoryBank recall is optionally filtered through `StateFilter`
+- Writer generates a draft
+- Editor reviews it
+- RedTeam attacks it
+- Review policy determines status
+- Chapter is saved back to `StateDB`
+- Events are published to the in-process `EventBus`
+
+If a change affects chapter generation behavior, inspect `orchestrator.py` before changing individual agents.
+
+### `Studio/api.py` is the real backend entrypoint
+
+Most backend behavior is centralized there: lifecycle, config, projects, chapters, outlines, pipeline control, snapshots, token stats, import/export, trend/style/AI-detect endpoints, WebSocket, and SPA serving.
+
+When looking for a route, search `Studio/api.py` first.
+
+### Multi-project support is one SQLite DB per project
+
+`Engine/core/project_manager.py` manages project metadata in `.projects/catalog.db` and creates one SQLite file per project under `.projects/<project_id>.db`.
+
+Important detail: activating a project via `/api/projects/{project_id}/activate` swaps `app.state.db` to that project's `StateDB`. Project context is therefore **process-global on the backend**, not request-scoped.
+
+### Frontend project state is separate from backend active project state
+
+The frontend stores the selected book in React context (`currentBook` in `frontend/src/App.tsx`), while the backend tracks the active project by replacing `app.state.db`.
+
+This split matters:
+
+- refreshing the SPA can lose `currentBook` even if the backend still has an active project
+- project-scoped bugs often involve `frontend/src/App.tsx`, `frontend/src/pages/Projects.tsx`, and `Studio/api.py` together
+
+### The frontend is page-driven and API-thin
+
+Useful files:
+
+- `frontend/src/App.tsx` — route layout, system menu vs book-scoped menu, `BookGuard`
+- `frontend/src/api/client.ts` — the frontend API surface
+- `frontend/src/pages/*` — page-level feature wrappers
+
+Most pages do not model project resources by URL; they operate on whichever backend project is currently active.
+
+## Important implementation notes
+
+### Prefer `/api/*` endpoints for new work
+
+The backend still exposes some older non-`/api` endpoints such as `/characters` and `/state/snapshot` alongside `/api/*` equivalents. Prefer the `/api/*` surface unless maintaining legacy behavior or tests.
+
+### Pipeline control uses a singleton manager
+
+`Studio/api.py` uses a global `PipelineManager` for run/pause/resume/stop behavior. Pipeline state is shared at the app level, similar to project activation.
+
+### Advanced features may return degraded or placeholder results
+
+Several LLM-facing features fall back to mock, dummy, or heuristic behavior when config is missing or a call fails. This is especially relevant for:
+
+- side story generation
+- imitation generation
+- trend analysis
+- parts of the chapter pipeline when real LLM config is unavailable
+
+Do not assume every successful API response came from a real model-backed path.
+
+### Config is read from both env and DB-backed state
+
+`.env.example` defines environment variables, but `Studio/api.py` also reads and writes config via `/api/config` and stores it in the database. If config behavior looks inconsistent, inspect both env vars and the `state` table-backed config path.
+
+### API tests use the app factory with an in-memory DB
+
+`tests/studio/test_api.py` uses:
+
+```python
+create_app(seed_data=False, db_path=":memory:")
+```
+
+Use that pattern for isolated API tests.
+
+### There is no checked-in Python lint/format config
+
+The repo has frontend linting, but no repository-level Python tooling config like `pyproject.toml` for Ruff/Black/Mypy. Do not assume Python lint/format commands are wired into the project.
+
+## Read these first for non-trivial tasks
+
+- `Studio/api.py`
+- `Engine/core/state_db.py`
+- `Engine/core/models.py`
+- `Engine/core/orchestrator.py`
+- `Engine/core/project_manager.py`
+- `frontend/src/App.tsx`
+- `frontend/src/api/client.ts`
+- the specific page under `frontend/src/pages/` that owns the feature you are touching

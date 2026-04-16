@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict
 
+from Engine.config import DEFAULT_LLM_BASE_URL
+
 if TYPE_CHECKING:
     from openai import OpenAI
 
@@ -18,7 +20,7 @@ class BaseAgent:
         model_name: str,
         system_prompt: str,
         api_key: str = "",
-        base_url: str = "https://api.openai.com/v1",
+        base_url: str = DEFAULT_LLM_BASE_URL,
     ):
         self.model = model_name
         self.system_prompt = system_prompt
@@ -44,7 +46,7 @@ class BaseAgent:
             model_name=router_info["model"],
             system_prompt=system_prompt,
             api_key=router_info.get("api_key", ""),
-            base_url=router_info.get("base_url", "https://api.openai.com/v1"),
+            base_url=router_info.get("base_url", DEFAULT_LLM_BASE_URL),
         )
 
     def run(self, context: Dict[str, Any]) -> Any:

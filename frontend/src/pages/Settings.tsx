@@ -163,7 +163,10 @@ export function Settings() {
     <div className="h-full overflow-auto p-6">
       {/* Toolbar */}
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-lg font-semibold">设置</h2>
+        <div>
+          <h2 className="text-lg font-semibold">当前项目设置</h2>
+          <p className="text-sm text-gray-400 mt-1">管理当前项目的模型、流水线和版本快照配置</p>
+        </div>
         <div className="flex items-center gap-3">
           {saved && (
             <span className="text-sm text-green-500">已保存</span>

@@ -1,16 +1,15 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { Button } from "../components/ui/button";
 import type { Chapter } from "../types";
 
 export function Chapters() {
-  const navigate = useNavigate();
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Chapter | null>(null);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
+  const [generating, setGenerating] = useState(false);
 
   useEffect(() => {
     loadChapters();
@@ -47,7 +46,7 @@ export function Chapters() {
       });
       setEditing(false);
       loadChapters();
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Failed to save chapter:", e);
     }
   };
@@ -57,11 +56,43 @@ export function Chapters() {
     try {
       await api.deleteChapter(num);
       loadChapters();
-      if (selected?.chapter_num === num) {
-        setSelected(null);
-      }
-    } catch (e: any) {
+      if (selected?.chapter_num === num) setSelected(null);
+    } catch (e: unknown) {
       console.error("Failed to delete chapter:", e);
+    }
+  };
+
+  const handleGenerate = async () => {
+    const nextNum = chapters.length > 0
+      ? Math.max(...chapters.map((c) => c.chapter_num)) + 1
+      : 1;
+    setGenerating(true);
+    try {
+      await api.runChapter(nextNum);
+      loadChapters();
+    } catch (e: unknown) {
+      console.error("Failed to generate chapter:", e);
+      alert("生成失败: " + ((e instanceof Error ? e.message : "未知错误")));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleExport = async () => {
+    const format = prompt("选择导出格式 (txt/md/html):", "txt");
+    if (!format || !["txt", "md", "html"].includes(format)) return;
+    try {
+      const res = await api.exportNovel(format);
+      const { content, filename } = res.data;
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      alert("导出失败: " + (e instanceof Error ? e.message : "未知错误"));
     }
   };
 
@@ -86,65 +117,80 @@ export function Chapters() {
   };
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-gray-400">加载章节中...</p>
-      </div>
-    );
+    return <div className="flex items-center justify-center h-full"><p className="text-gray-400">加载章节中...</p></div>;
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="outline" size="sm" onClick={() => navigate("/")}>
-            返回
-          </Button>
-          <h1 className="text-xl font-bold">章节管理</h1>
-          <span className="text-sm text-gray-400">共 {chapters.length} 章</span>
+    <div className="flex h-full">
+      {/* Chapter List */}
+      <aside className="w-72 border-r bg-white overflow-y-auto flex flex-col">
+        <div className="p-3 border-b flex justify-between items-center">
+          <h2 className="font-semibold">章节列表</h2>
+          <span className="text-xs text-gray-400">{chapters.length} 章</span>
         </div>
-        <div className="flex gap-2">
-          <Button onClick={() => navigate("/workspace")}>进入工作区</Button>
+        <div className="p-2 flex-1 overflow-y-auto">
+          {chapters.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">
+              <div className="text-3xl mb-2">📭</div>
+              <p className="text-sm">暂无章节</p>
+              <p className="text-xs mb-3">点击右上方「生成下一章」开始</p>
+            </div>
+          ) : (
+            chapters.map((ch) => (
+              <button
+                key={ch.chapter_num}
+                onClick={() => handleSelect(ch.chapter_num)}
+                className={`w-full text-left p-3 rounded-lg mb-1 transition ${
+                  selected?.chapter_num === ch.chapter_num
+                    ? "bg-blue-50 border border-blue-200"
+                    : "hover:bg-gray-50"
+                }`}
+              >
+                <div className="flex justify-between items-center">
+                  <span className="font-medium text-sm">
+                    第{ch.chapter_num}章 {ch.title || ""}
+                  </span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor(ch.status)}`}>
+                    {statusLabel(ch.status)}
+                  </span>
+                </div>
+                <div className="text-xs text-gray-400 mt-1 truncate">
+                  {ch.content?.substring(0, 60) || "暂无内容"}
+                </div>
+              </button>
+            ))
+          )}
         </div>
-      </header>
+      </aside>
 
-      <div className="flex h-[calc(100vh-64px)]">
-        {/* Chapter List */}
-        <aside className="w-80 border-r bg-white overflow-y-auto">
-          <div className="p-3 space-y-1">
-            {chapters.length === 0 ? (
-              <p className="text-sm text-gray-400 p-4 text-center">暂无章节</p>
-            ) : (
-              chapters.map((ch) => (
-                <button
-                  key={ch.chapter_num}
-                  onClick={() => handleSelect(ch.chapter_num)}
-                  className={`w-full text-left p-3 rounded-lg mb-1 transition ${
-                    selected?.chapter_num === ch.chapter_num
-                      ? "bg-blue-50 border border-blue-200"
-                      : "hover:bg-gray-50"
-                  }`}
-                >
-                  <div className="flex justify-between items-center">
-                    <span className="font-medium text-sm">
-                      第{ch.chapter_num}章 {ch.title || ""}
-                    </span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor(ch.status)}`}>
-                      {statusLabel(ch.status)}
-                    </span>
-                  </div>
-                  <div className="text-xs text-gray-400 mt-1 truncate">
-                    {ch.content?.substring(0, 50) || "暂无内容"}
-                  </div>
-                </button>
-              ))
-            )}
+      {/* Chapter Content */}
+      <main className="flex-1 overflow-hidden flex flex-col">
+        {/* Toolbar */}
+        <div className="flex items-center justify-between px-4 py-2 border-b bg-white">
+          <span className="text-sm text-gray-500">
+            {selected ? `第${selected.chapter_num}章 · ${selected.title || ""}` : "选择左侧章节"}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExport}
+              disabled={chapters.length === 0}
+            >
+              导出
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleGenerate}
+              disabled={generating}
+            >
+              {generating ? "生成中..." : "生成下一章"}
+            </Button>
           </div>
-        </aside>
+        </div>
 
-        {/* Chapter Content */}
-        <main className="flex-1 overflow-y-auto">
+        {/* Content Area */}
+        <div className="flex-1 overflow-y-auto">
           {selected ? (
             <div className="max-w-3xl mx-auto p-8">
               <div className="flex justify-between items-center mb-6">
@@ -153,7 +199,7 @@ export function Chapters() {
                 </h2>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={() => setEditing(!editing)}>
-                    {editing ? "取消编辑" : "编辑"}
+                    {editing ? "取消" : "编辑"}
                   </Button>
                   {editing && (
                     <Button size="sm" onClick={handleSave}>保存</Button>
@@ -175,17 +221,29 @@ export function Chapters() {
                 />
               ) : (
                 <div className="bg-white rounded-lg border p-6 min-h-[500px] whitespace-pre-wrap font-serif text-base leading-relaxed">
-                  {selected.content || "暂无内容"}
+                  {selected.content || (
+                    <div className="text-center text-gray-400 py-12">
+                      <p className="text-lg mb-2">暂无内容</p>
+                      <p className="text-sm">点击上方「生成下一章」AI 创作</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           ) : (
             <div className="flex items-center justify-center h-full text-gray-400">
-              选择左侧章节查看内容
+              <div className="text-center">
+                <div className="text-6xl mb-4">✍️</div>
+                <h2 className="text-2xl font-bold mb-2">开始创作</h2>
+                <p className="text-gray-500 mb-4">生成大纲后，AI 将自动写章节</p>
+                <Button size="lg" onClick={handleGenerate} disabled={generating}>
+                  {generating ? "生成中..." : "生成第一章"}
+                </Button>
+              </div>
             </div>
           )}
-        </main>
-      </div>
+        </div>
+      </main>
     </div>
   );
 }

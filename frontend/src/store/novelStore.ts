@@ -2,6 +2,9 @@ import { create } from "zustand";
 import type { Chapter, NovelProject, PipelineStatus, CharacterState } from "../types";
 import { api } from "../api/client";
 
+const getErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : "Unknown error";
+
 interface NovelStore {
   project: NovelProject | null;
   chapters: Chapter[];
@@ -14,11 +17,12 @@ interface NovelStore {
   // Actions
   fetchStatus: () => Promise<void>;
   fetchChapters: () => Promise<void>;
-  fetchChapter: (num: number) => Promise<any>;
+  fetchChapter: (num: number) => Promise<Chapter | null>;
   fetchCharacters: () => Promise<void>;
   selectChapter: (num: number) => void;
   updateChapter: (num: number, content: string) => void;
   generateChapter: (num: number) => Promise<void>;
+  clearAll: () => void;
 }
 
 export const useNovelStore = create<NovelStore>((set, get) => ({
@@ -35,7 +39,7 @@ export const useNovelStore = create<NovelStore>((set, get) => ({
     try {
       const res = await api.status();
       set({ project: res.data });
-    } catch (e) {
+    } catch {
       set({ error: "Failed to fetch status" });
     } finally {
       set({ loading: false });
@@ -57,9 +61,9 @@ export const useNovelStore = create<NovelStore>((set, get) => ({
   fetchChapter: async (num: number) => {
     try {
       const res = await api.getChapter(num);
-      return res.data;
-    } catch (e: any) {
-      set({ error: e.message });
+      return res.data as Chapter;
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error) });
       return null;
     }
   },
@@ -81,8 +85,8 @@ export const useNovelStore = create<NovelStore>((set, get) => ({
       await api.updateChapter(num, { content });
       // Refresh chapters
       get().fetchChapters();
-    } catch (e: any) {
-      set({ error: e.message });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -92,10 +96,20 @@ export const useNovelStore = create<NovelStore>((set, get) => ({
       await api.runChapter(num);
       // Refresh chapters after generation
       await get().fetchChapters();
-    } catch (e: any) {
-      set({ error: e.message });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error) });
     } finally {
       set({ loading: false });
     }
   },
+
+  clearAll: () => set({
+    project: null,
+    chapters: [],
+    characters: [],
+    pipeline: null,
+    selectedChapter: null,
+    loading: false,
+    error: null,
+  }),
 }));

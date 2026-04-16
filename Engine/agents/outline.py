@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import List, Optional
 
+from Engine.config import DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL
 from Engine.core.models import Outline
 
 
@@ -28,9 +29,9 @@ class OutlineAgent:
 
     def __init__(
         self,
-        model_name: str = "qwen-plus",
+        model_name: str = DEFAULT_LLM_MODEL,
         api_key: str = "",
-        base_url: str = "https://api.openai.com/v1",
+        base_url: str = DEFAULT_LLM_BASE_URL,
     ):
         self.model_name = model_name
         self.api_key = api_key

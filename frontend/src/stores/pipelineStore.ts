@@ -1,5 +1,9 @@
 import { create } from "zustand";
+import type { PipelineRunStatus } from "../types";
 import { api } from "../api/client";
+
+const getErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : "Unknown error";
 
 interface PipelineState {
   running: boolean;
@@ -14,8 +18,8 @@ interface PipelineState {
 
   // Actions
   fetchStatus: () => Promise<void>;
-  runChapter: (num: number) => Promise<any>;
-  runBatch: (start: number, end: number) => Promise<any>;
+  runChapter: (num: number) => Promise<unknown>;
+  runBatch: (start: number, end: number) => Promise<unknown>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   stop: () => Promise<void>;
@@ -36,15 +40,16 @@ export const usePipelineStore = create<PipelineState>((set) => ({
   fetchStatus: async () => {
     try {
       const res = await api.getPipelineStatus();
-      const data = res.data;
+      const data = res.data as Partial<PipelineRunStatus>;
       set({
         running: data.running || false,
         paused: data.paused || false,
         currentChapter: data.current_chapter || 0,
         totalChapters: data.total_chapters || 0,
+        error: null,
       });
-    } catch {
-      // Silently fail
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -53,10 +58,11 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     try {
       const res = await api.runChapter(num);
       set({ loading: false, currentChapter: num, running: true, progress: 0 });
-      return res.data;
-    } catch (e: any) {
-      set({ loading: false, error: e.message });
-      throw e;
+      return res.data as unknown;
+    } catch (error: unknown) {
+      const normalizedError = error instanceof Error ? error : new Error(getErrorMessage(error));
+      set({ loading: false, error: normalizedError.message });
+      throw normalizedError;
     }
   },
 
@@ -65,10 +71,11 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     try {
       const res = await api.runBatch({ start_chapter: start, end_chapter: end });
       set({ loading: false, running: true, currentChapter: start, totalChapters: end - start + 1 });
-      return res.data;
-    } catch (e: any) {
-      set({ loading: false, error: e.message });
-      throw e;
+      return res.data as unknown;
+    } catch (error: unknown) {
+      const normalizedError = error instanceof Error ? error : new Error(getErrorMessage(error));
+      set({ loading: false, error: normalizedError.message });
+      throw normalizedError;
     }
   },
 
@@ -76,8 +83,8 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     try {
       await api.pausePipeline();
       set({ paused: true });
-    } catch (e: any) {
-      set({ error: e.message });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -85,8 +92,8 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     try {
       await api.resumePipeline();
       set({ paused: false });
-    } catch (e: any) {
-      set({ error: e.message });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -94,8 +101,8 @@ export const usePipelineStore = create<PipelineState>((set) => ({
     try {
       await api.stopPipeline();
       set({ running: false, paused: false, currentStep: "", progress: 0 });
-    } catch (e: any) {
-      set({ error: e.message });
+    } catch (error: unknown) {
+      set({ error: getErrorMessage(error) });
     }
   },
 

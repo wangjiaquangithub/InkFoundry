@@ -17,22 +17,30 @@ interface PipelineEvent {
 export function useWebSocket(url: string) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectRef = useRef<() => void>(() => {});
+  const shouldReconnectRef = useRef(true);
 
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (
+      wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
 
     try {
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        // Subscribe to pipeline events
         ws.send(JSON.stringify({ action: "subscribe" }));
       };
 
       ws.onclose = () => {
-        // Auto-reconnect after 3s
-        reconnectTimerRef.current = setTimeout(() => connect(), 3000);
+        if (!shouldReconnectRef.current) {
+          return;
+        }
+        reconnectTimerRef.current = setTimeout(() => connectRef.current(), 3000);
       };
 
       ws.onmessage = (event) => {
@@ -63,12 +71,20 @@ export function useWebSocket(url: string) {
         // Will be handled by onclose
       };
     } catch {
+      if (!shouldReconnectRef.current) {
+        return;
+      }
       // Connection failed, retry
-      reconnectTimerRef.current = setTimeout(() => connect(), 3000);
+      reconnectTimerRef.current = setTimeout(() => connectRef.current(), 3000);
     }
   }, [url]);
 
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
   const disconnect = useCallback(() => {
+    shouldReconnectRef.current = false;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -83,6 +99,7 @@ export function useWebSocket(url: string) {
   }, []);
 
   useEffect(() => {
+    shouldReconnectRef.current = true;
     connect();
     return () => {
       disconnect();

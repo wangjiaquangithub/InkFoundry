@@ -37,7 +37,8 @@ class StyleExtractor:
         unique_words = set(words)
 
         avg_sentence_len = sum(len(s) for s in sentences) / max(len(sentences), 1)
-        avg_para_len = len(paragraphs) / max(len(paragraphs), 1)
+        # avg sentences per paragraph
+        avg_para_len = sum(max(1, len([s for s in re.split(r'[。！？]', p) if s.strip()])) for p in paragraphs) / max(len(paragraphs), 1)
         vocab_richness = len(unique_words) / max(len(words), 1)
 
         patterns = StyleExtractor._detect_patterns(text)

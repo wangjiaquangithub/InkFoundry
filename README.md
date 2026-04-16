@@ -125,8 +125,8 @@ On Retry 3, `graceful_degradation=True` returns a fallback instead of raising, s
 
 | Level | Override | Example |
 |-------|----------|---------|
-| L1 | Global default | `qwen-plus` for everything |
-| L2 | Per-role model | Writer uses `qwen-plus`, Editor uses `claude-sonnet` |
+| L1 | Global default | `qwen3.6-plus` for everything |
+| L2 | Per-role model | Writer uses `qwen3.6-plus`, Editor uses `claude-sonnet` |
 | L3 | Task importance | Climax chapters use `claude-opus` |
 
 ## Test Results

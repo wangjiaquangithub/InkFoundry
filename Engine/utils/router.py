@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, TypedDict
 
+from Engine.config import DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL
+
 
 class ModelInfo(TypedDict):
     """Resolved model configuration."""
@@ -38,16 +40,16 @@ class ModelRouter:
         # Determine model name
         if agent_type == "writer" and importance == "high":
             # L3: Writer with high importance gets role-specific model
-            model_name = self.config.get("writer", self.config.get("default_model", "qwen-plus"))
+            model_name = self.config.get("writer", self.config.get("default_model", DEFAULT_LLM_MODEL))
         elif agent_type in ("editor", "redteam", "navigator", "director") and agent_type in self.config:
             # L2: Agent-specific override for non-writer roles
             model_name = self.config[agent_type]
         else:
             # L1: Global default (writer low importance also goes here)
-            model_name = self.config.get("default_model", "qwen-plus")
+            model_name = self.config.get("default_model", DEFAULT_LLM_MODEL)
 
         return ModelInfo(
             model=model_name,
             api_key=self.config.get("api_key", ""),
-            base_url=self.config.get("base_url", "https://api.openai.com/v1"),
+            base_url=self.config.get("base_url", DEFAULT_LLM_BASE_URL),
         )

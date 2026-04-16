@@ -121,18 +121,18 @@ def test_state_filter_blocks_deceased():
 def test_model_router_integration():
     """Test model router with pipeline configuration."""
     config = {
-        "default_model": "qwen-plus",
+        "default_model": "qwen3.6-plus",
         "api_key": "test-key",
         "base_url": "https://example.com/v1",
     }
     router = ModelRouter(config)
 
     result = router.get_model("writer")
-    assert result["model"] == "qwen-plus"
+    assert result["model"] == "qwen3.6-plus"
     assert result["api_key"] == "test-key"
 
     result = router.get_model("editor", importance="high")
-    assert result["model"] == "qwen-plus"
+    assert result["model"] == "qwen3.6-plus"
     assert result["api_key"] == "test-key"
 
 
@@ -141,17 +141,17 @@ def test_config_router_agent_flow(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
     monkeypatch.setenv("DEFAULT_MODEL", "qwen-turbo")
-    monkeypatch.setenv("WRITER_MODEL", "qwen-plus")
+    monkeypatch.setenv("WRITER_MODEL", "qwen3.6-plus")
 
     config = EngineConfig.from_env()
     router = ModelRouter(config.to_router_config())
 
     info = router.get_model("writer", importance="high")
-    assert info["model"] == "qwen-plus"
+    assert info["model"] == "qwen3.6-plus"
     assert info["api_key"] == "test-key"
 
     agent = BaseAgent.from_router_info(info, system_prompt="Write.")
-    assert agent.model == "qwen-plus"
+    assert agent.model == "qwen3.6-plus"
     assert agent.api_key == "test-key"
     assert agent.base_url == "https://example.com/v1"
 
@@ -252,7 +252,7 @@ def test_daemon_scheduler_with_state_transitions():
             completed_tasks.append(task)
             # Record token usage for this task
             tracker.record(
-                model="qwen-plus",
+                model="qwen3.6-plus",
                 prompt_tokens=1000,
                 completion_tokens=500,
                 task=task.get("name", "unknown"),
@@ -375,8 +375,8 @@ def test_full_chapter_lifecycle():
 
     # 9. Token tracking
     tracker = TokenTracker()
-    tracker.record("qwen-plus", 2000, 1500, "writer_chapter_1")
-    tracker.record("qwen-plus", 500, 300, "editor_chapter_1")
+    tracker.record("qwen3.6-plus", 2000, 1500, "writer_chapter_1")
+    tracker.record("qwen3.6-plus", 500, 300, "editor_chapter_1")
     stats = tracker.stats
     assert stats.total_requests == 2
     assert stats.total_tokens == 4300
