@@ -2,20 +2,33 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from Engine.config import (
+    DEFAULT_LLM_BASE_URL,
+    DEFAULT_LLM_MODEL,
+    ROLE_NAMES,
+    EngineConfig,
+    InvalidLLMConfigError,
+    LLMConfig,
+    normalize_base_url,
+    normalize_model_name,
+    validate_llm_settings,
+)
 from Engine.core.state_db import StateDB
 from Engine.core.models import (
     CharacterState, Chapter, Outline, CharacterProfile,
     CharacterRelationship, WorldBuilding, PowerSystem, Timeline,
+    StateSnapshot, WorldState,
 )
 
 
@@ -158,6 +171,24 @@ class DaemonStartRequest(BaseModel):
     interval_seconds: int = 60
 
 
+class AIDetectRequest(BaseModel):
+    text: str = ""
+
+
+class TrendAnalyzeRequest(BaseModel):
+    genre: str = ""
+    keywords: List[str] = []
+
+
+class ProjectCreate(BaseModel):
+    title: str
+    genre: str = "unknown"
+
+
+class ReviewRejectRequest(BaseModel):
+    note: str = ""
+
+
 class PipelineManager:
     """Singleton that owns the running PipelineOrchestrator and its background task.
 
@@ -176,9 +207,10 @@ class PipelineManager:
 
     def _create_orchestrator(self, db: StateDB) -> Any:
         """Create a new PipelineOrchestrator with current config."""
+        import json
         from Engine.core.orchestrator import PipelineOrchestrator
         from Engine.core.memory_bank import MemoryBank
-        config = _get_engine_config(db)
+        config = _get_engine_config_or_http(db)
 
         # Get review_mode from config
         review_mode = "strict"
@@ -283,6 +315,7 @@ class PipelineManager:
             self._task.cancel()
         self._task = None
         self._orchestrator = None
+        self._db = None
         return {"message": "Pipeline stopped"}
 
     def get_status(self) -> Dict[str, Any]:
@@ -296,9 +329,7 @@ class PipelineManager:
 # Global singleton
 _pipeline_manager = PipelineManager()
 
-# Project manager singleton
 from Engine.core.project_manager import ProjectManager
-_project_manager = ProjectManager()
 
 # Token tracker singleton (initialized with db in lifespan)
 _token_tracker: Optional[TokenTracker] = None
@@ -323,46 +354,91 @@ def _get_db(request: Request) -> StateDB:
     return request.app.state.db
 
 
+def _get_project_manager(request: Request) -> ProjectManager:
+    """Dependency injection for ProjectManager."""
+    return request.app.state.project_manager
+
+
+def _load_stored_config(db: StateDB) -> Dict[str, Any]:
+    """Load only DB-persisted config values."""
+    cursor = db.conn.execute("SELECT data FROM state WHERE key = 'config'")
+    row = cursor.fetchone()
+    if not row:
+        return {}
+
+    try:
+        config = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(status_code=500, detail="Stored config contains invalid JSON") from exc
+
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=500, detail="Stored config must be a JSON object")
+
+    return config
+
+
+def _get_effective_config(db: StateDB) -> Dict[str, Any]:
+    """Merge env defaults with DB-stored configuration."""
+    config = {
+        "llm_api_key": os.getenv("LLM_API_KEY", ""),
+        "llm_base_url": normalize_base_url(os.getenv("LLM_BASE_URL")),
+        "default_model": normalize_model_name(os.getenv("DEFAULT_MODEL")),
+        "review_mode": "strict",
+        "max_retries": 3,
+        "pipeline_parallel": False,
+    }
+    for role in ROLE_NAMES:
+        config[f"{role}_model"] = os.getenv(f"{role.upper()}_MODEL", "")
+
+    config.update(_load_stored_config(db))
+    config["llm_base_url"] = normalize_base_url(config.get("llm_base_url"))
+    config["default_model"] = normalize_model_name(config.get("default_model"))
+    return config
+
+
+def _validate_effective_config(config: Dict[str, Any]) -> None:
+    role_models = {
+        role: normalize_model_name(config.get(f"{role}_model"))
+        for role in ROLE_NAMES
+        if config.get(f"{role}_model")
+    }
+    validate_llm_settings(
+        config.get("default_model", DEFAULT_LLM_MODEL),
+        config.get("llm_base_url", DEFAULT_LLM_BASE_URL),
+        role_models,
+    )
+
+
 def _get_engine_config(db: StateDB):
     """Build EngineConfig from database-stored config + environment.
 
     Returns EngineConfig if API key is available, otherwise None (fallback to mock).
     """
-    import json as _json
-
-    api_key = os.getenv("LLM_API_KEY", "")
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-    default_model = os.getenv("DEFAULT_MODEL", "qwen-plus")
-
-    # Try to override with DB-stored config
-    try:
-        cursor = db.conn.execute("SELECT data FROM state WHERE key = 'config'")
-        row = cursor.fetchone()
-        if row:
-            db_config = _json.loads(row[0])
-            if db_config.get("llm_api_key") and db_config["llm_api_key"] != os.getenv("LLM_API_KEY", ""):
-                # Use DB-stored key if different from env
-                api_key = db_config["llm_api_key"]
-            if db_config.get("llm_base_url"):
-                base_url = db_config["llm_base_url"]
-            if db_config.get("default_model"):
-                default_model = db_config["default_model"]
-    except Exception:
-        pass
-
+    config = _get_effective_config(db)
+    api_key = config.get("llm_api_key", "")
     if not api_key:
         return None
 
-    from Engine.config import EngineConfig, LLMConfig
+    _validate_effective_config(config)
 
-    llm = LLMConfig(api_key=api_key, base_url=base_url, default_model=default_model)
-
-    role_models = {}
-    for role in ("writer", "editor", "redteam", "navigator", "director"):
-        env_key = f"{role.upper()}_MODEL"
-        role_models[role] = os.getenv(env_key, default_model)
-
+    llm = LLMConfig(
+        api_key=api_key,
+        base_url=config["llm_base_url"],
+        default_model=config["default_model"],
+    )
+    role_models = {
+        role: normalize_model_name(config.get(f"{role}_model")) if config.get(f"{role}_model") else config["default_model"]
+        for role in ROLE_NAMES
+    }
     return EngineConfig(llm=llm, role_models=role_models)
+
+
+def _get_engine_config_or_http(db: StateDB):
+    """Return EngineConfig, surfacing malformed stored config as 500 and invalid LLM settings as 422."""
+    try:
+        return _get_engine_config(db)
+    except InvalidLLMConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _seed_sample_data(db: StateDB) -> None:
@@ -379,21 +455,157 @@ def _seed_sample_data(db: StateDB) -> None:
             db.update_character(char)
 
 
-def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
+def _list_character_states(db: StateDB) -> List[CharacterState]:
+    cursor = db.conn.execute("SELECT data FROM characters ORDER BY name ASC")
+    return [CharacterState.model_validate_json(row[0]) for row in cursor.fetchall()]
+
+
+def _list_world_states(db: StateDB) -> List[WorldState]:
+    cursor = db.conn.execute("SELECT data FROM world_states ORDER BY name ASC")
+    return [WorldState.model_validate_json(row[0]) for row in cursor.fetchall()]
+
+
+def _latest_snapshot_version(db: StateDB) -> int:
+    version_row = db.conn.execute("SELECT MAX(version) FROM snapshots").fetchone()
+    return version_row[0] or 0
+
+
+def _require_snapshot_chapter_payload(snapshot: StateSnapshot) -> List[Dict[str, Any]]:
+    chapters_data = snapshot.metadata.get("chapters")
+    if chapters_data is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Snapshot v{snapshot.version} is incompatible with chapter restore; "
+                "missing metadata.chapters"
+            ),
+        )
+    if not isinstance(chapters_data, list):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Snapshot v{snapshot.version} has invalid chapter payload",
+        )
+    return chapters_data
+
+
+def _current_chapter_num(db: StateDB) -> int:
+    chapters = db.list_chapters()
+    return max((chapter.chapter_num for chapter in chapters), default=0)
+
+
+def _build_current_snapshot(db: StateDB, version: int = 0) -> StateSnapshot:
+    with db.lock:
+        db.conn.execute("BEGIN")
+        try:
+            chapters = db.list_chapters()
+            characters = _list_character_states(db)
+            world_states = _list_world_states(db)
+            snapshot = StateSnapshot(
+                version=version,
+                chapter_num=max((chapter.chapter_num for chapter in chapters), default=0),
+                characters=characters,
+                world_states=world_states,
+                metadata={"chapters": [chapter.model_dump() for chapter in chapters]},
+            )
+            db.conn.execute("COMMIT")
+            return snapshot
+        except Exception:
+            db.conn.execute("ROLLBACK")
+            raise
+
+
+def _serialize_agent_results(agent_results: Any) -> str:
+    if isinstance(agent_results, str):
+        try:
+            json.loads(agent_results)
+            return agent_results
+        except json.JSONDecodeError:
+            return json.dumps(agent_results)
+    return json.dumps(agent_results)
+
+
+def _restore_snapshot_state(db: StateDB, snapshot: StateSnapshot) -> None:
+    chapters_data = _require_snapshot_chapter_payload(snapshot)
+    chapters = [Chapter.model_validate(chapter_data) for chapter_data in chapters_data]
+
+    with db.lock:
+        with db.conn:
+            db.conn.execute("DELETE FROM characters")
+            for character in snapshot.characters:
+                db.conn.execute(
+                    "INSERT OR REPLACE INTO characters (name, data) VALUES (?, ?)",
+                    (character.name, character.model_dump_json()),
+                )
+
+            db.conn.execute("DELETE FROM world_states")
+            for world_state in snapshot.world_states:
+                db.conn.execute(
+                    "INSERT OR REPLACE INTO world_states (name, data) VALUES (?, ?)",
+                    (world_state.name, world_state.model_dump_json()),
+                )
+
+            db.conn.execute("DELETE FROM chapters")
+            for chapter in chapters:
+                db.conn.execute(
+                    """INSERT OR REPLACE INTO chapters
+                       (chapter_num, title, content, status, word_count,
+                        tension_level, version, review_notes, agent_results,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        chapter.chapter_num,
+                        chapter.title,
+                        chapter.content,
+                        chapter.status,
+                        chapter.word_count,
+                        chapter.tension_level,
+                        chapter.version,
+                        chapter.review_notes,
+                        _serialize_agent_results(chapter.agent_results),
+                        chapter.created_at,
+                        chapter.updated_at,
+                    ),
+                )
+
+
+def _current_state_snapshot_response(db: StateDB) -> StateSnapshotResponse:
+    characters = _list_character_states(db)
+    world_states = _list_world_states(db)
+    return StateSnapshotResponse(
+        version=_latest_snapshot_version(db),
+        chapter_num=_current_chapter_num(db),
+        characters=[character.model_dump() for character in characters],
+        world_states=[world_state.model_dump() for world_state in world_states],
+    )
+
+
+def create_app(
+    seed_data: bool = False,
+    db_path: str | None = None,
+    projects_dir: str | None = None,
+) -> FastAPI:
     """Create and configure the Studio FastAPI application.
 
     Args:
         seed_data: Whether to seed sample data.
         db_path: Database path. Defaults to env INKFOUNDRY_DB_PATH or 'state.db'.
                  Use ':memory:' for testing.
+        projects_dir: Project catalog directory. Defaults to env INKFOUNDRY_PROJECTS_DIR
+                      or '.projects'. Use a temp directory for isolated tests.
     """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Manage application lifecycle with proper resource cleanup."""
         resolved_db_path = db_path if db_path is not None else os.environ.get("INKFOUNDRY_DB_PATH", "state.db")
+        resolved_projects_dir = (
+            projects_dir
+            if projects_dir is not None
+            else os.environ.get("INKFOUNDRY_PROJECTS_DIR", ".projects")
+        )
         db = StateDB(resolved_db_path)
         app.state.db = db
+        app.state.project_manager = ProjectManager(resolved_projects_dir)
         if seed_data:
             _seed_sample_data(db)
         _init_token_tracker(db)
@@ -417,70 +629,48 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
     @app.get("/api/config")
     def get_config(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         """Get current configuration from database."""
-        import os
-        # Try to get from env first
-        config = {
-            "llm_api_key": os.getenv("LLM_API_KEY", ""),
-            "llm_base_url": os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
-            "default_model": os.getenv("DEFAULT_MODEL", "qwen-plus"),
-            "writer_model": os.getenv("WRITER_MODEL", ""),
-            "editor_model": os.getenv("EDITOR_MODEL", ""),
-            "redteam_model": os.getenv("REDTEAM_MODEL", ""),
-            "navigator_model": os.getenv("NAVIGATOR_MODEL", ""),
-            "director_model": os.getenv("DIRECTOR_MODEL", ""),
-            "review_mode": "strict",
-            "max_retries": 3,
-            "pipeline_parallel": False,
-        }
-        # Override with DB-stored values if they exist
-        try:
-            cursor = db.conn.execute("SELECT data FROM state WHERE key = 'config'")
-            row = cursor.fetchone()
-            if row:
-                db_config = json.loads(row[0])
-                config.update(db_config)
-        except Exception:
-            pass  # No config stored yet
-        # Mask API key for security (show last 4 chars)
-        if config["llm_api_key"] and len(config["llm_api_key"]) > 8:
-            config["llm_api_key_masked"] = "****" + config["llm_api_key"][-4:]
+        config = _get_effective_config(db)
+        if config["llm_api_key"]:
+            config["llm_api_key_masked"] = (
+                "****" + config["llm_api_key"][-4:]
+                if len(config["llm_api_key"]) > 4
+                else "****"
+            )
+            config["llm_api_key"] = ""
         return config
 
     @app.post("/api/config")
     def save_config(body: ConfigSave, db: StateDB = Depends(_get_db)) -> Dict[str, str]:
         """Save configuration to database."""
-        import os
-        # Get existing config
-        existing_config = {}
-        try:
-            cursor = db.conn.execute("SELECT data FROM state WHERE key = 'config'")
-            row = cursor.fetchone()
-            if row:
-                existing_config = json.loads(row[0])
-        except Exception:
-            pass
+        import json
 
-        # Update config with new values
+        existing_config = _load_stored_config(db)
         new_config = existing_config.copy()
         for field_name in body.model_fields_set:
             value = getattr(body, field_name)
             if value is not None:
-                new_config[field_name] = value
+                if field_name == "llm_base_url":
+                    new_config[field_name] = normalize_base_url(value)
+                elif field_name == "default_model":
+                    new_config[field_name] = normalize_model_name(value)
+                elif field_name.endswith("_model"):
+                    new_config[field_name] = value.strip()
+                else:
+                    new_config[field_name] = value
 
-        # Store in database
+        effective_config = _get_effective_config(db)
+        effective_config.update(new_config)
+
+        try:
+            _validate_effective_config(effective_config)
+        except InvalidLLMConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
         db.conn.execute(
             "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
             ("config", json.dumps(new_config)),
         )
         db.conn.commit()
-
-        # Also update environment for current session
-        if body.llm_api_key:
-            os.environ["LLM_API_KEY"] = body.llm_api_key
-        if body.llm_base_url:
-            os.environ["LLM_BASE_URL"] = body.llm_base_url
-        if body.default_model:
-            os.environ["DEFAULT_MODEL"] = body.default_model
 
         return {"message": "Configuration saved"}
 
@@ -545,15 +735,7 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
     @app.get("/state/snapshot")
     def get_state_snapshot(db: StateDB = Depends(_get_db)) -> StateSnapshotResponse:
         """Get current state snapshot."""
-        chars_cursor = db.conn.execute("SELECT data FROM characters")
-        ws_cursor = db.conn.execute("SELECT data FROM world_states")
-        version_row = db.conn.execute("SELECT MAX(version) FROM snapshots").fetchone()
-        return StateSnapshotResponse(
-            version=version_row[0] or 0,
-            chapter_num=1,
-            characters=[CharacterState.model_validate_json(r[0]).model_dump() for r in chars_cursor.fetchall()],
-            world_states=[{"name": "default", "description": "", "state": "normal"}],
-        )
+        return _current_state_snapshot_response(db)
 
     # --- WebSocket for pipeline ---
     @app.websocket("/ws/pipeline")
@@ -675,7 +857,7 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
     @app.post("/api/outlines/generate")
     async def generate_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         from Engine.agents.outline import OutlineAgent
-        config = _get_engine_config(db)
+        config = _get_engine_config_or_http(db)
         agent = OutlineAgent()
         if config and config.llm.api_key:
             agent = OutlineAgent(
@@ -870,15 +1052,14 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
         return {"message": f"Chapter {chapter_num} approved"}
 
     @app.post("/api/review/reject/{chapter_num}")
-    def reject_chapter(chapter_num: int, body: Dict[str, Any], db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+    def reject_chapter(chapter_num: int, body: ReviewRejectRequest, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         """Reject a chapter — set status to 'draft' with review note."""
         ch = db.get_chapter(chapter_num)
         if ch is None:
             raise HTTPException(status_code=404, detail=f"Chapter {chapter_num} not found")
         ch.status = "draft"
-        note = body.get("note", "")
-        if note:
-            ch.review_notes = f"{ch.review_notes or ''}\n审核拒绝: {note}"
+        if body.note:
+            ch.review_notes = f"{ch.review_notes or ''}\n审核拒绝: {body.note}"
         ch.updated_at = datetime.now().isoformat()
         db.update_chapter(ch)
         return {"message": f"Chapter {chapter_num} rejected"}
@@ -960,54 +1141,83 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
             os.unlink(tmp_path)
 
     # --- Project Management ---
-    class ProjectCreate(BaseModel):
-        title: str
-        genre: str = "unknown"
-
     @app.get("/api/projects")
-    def list_projects() -> Dict[str, Any]:
-        """List all active projects."""
-        projects = _project_manager.list_projects(status="active")
-        return {"projects": [p.__dict__ for p in projects]}
+    def list_projects(project_manager: ProjectManager = Depends(_get_project_manager)) -> Dict[str, Any]:
+        """List all active projects with chapter stats."""
+        projects = project_manager.list_projects(status="active")
+        result = []
+        for p in projects:
+            proj_dict = p.__dict__.copy()
+            # Enrich with chapter stats from the project's own StateDB
+            try:
+                from Engine.core.state_db import StateDB
+                db = StateDB(p.db_path)
+                chapters = db.list_chapters()
+                proj_dict["total_chapters"] = len(chapters)
+                proj_dict["latest_chapter"] = (
+                    max((c.chapter_num for c in chapters), default=0)
+                )
+                db.close()
+            except Exception:
+                proj_dict["total_chapters"] = 0
+                proj_dict["latest_chapter"] = 0
+            result.append(proj_dict)
+        return {"projects": result}
 
     @app.post("/api/projects")
-    def create_project(body: ProjectCreate) -> Dict[str, Any]:
+    def create_project(
+        body: ProjectCreate,
+        project_manager: ProjectManager = Depends(_get_project_manager),
+    ) -> Dict[str, Any]:
         """Create a new project."""
-        info = _project_manager.create_project(title=body.title, genre=body.genre)
+        info = project_manager.create_project(title=body.title, genre=body.genre)
         return {"message": f"Project '{body.title}' created", "project": info.__dict__}
 
     @app.get("/api/projects/{project_id}")
-    def get_project(project_id: str) -> Dict[str, Any]:
+    def get_project(
+        project_id: str,
+        project_manager: ProjectManager = Depends(_get_project_manager),
+    ) -> Dict[str, Any]:
         """Get project details."""
-        info = _project_manager.get_project(project_id)
+        info = project_manager.get_project(project_id)
         if info is None:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
         return {"project": info.__dict__}
 
     @app.delete("/api/projects/{project_id}")
-    def delete_project(project_id: str) -> Dict[str, str]:
+    def delete_project(
+        project_id: str,
+        project_manager: ProjectManager = Depends(_get_project_manager),
+    ) -> Dict[str, str]:
         """Soft-delete a project."""
-        success = _project_manager.delete_project(project_id)
+        success = project_manager.delete_project(project_id)
         if not success:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
         return {"message": f"Project '{project_id}' deleted"}
 
     @app.post("/api/projects/{project_id}/activate")
-    def activate_project(project_id: str, request: Request) -> Dict[str, str]:
+    def activate_project(
+        project_id: str,
+        request: Request,
+        project_manager: ProjectManager = Depends(_get_project_manager),
+    ) -> Dict[str, str]:
         """Switch to a different project — updates the active DB."""
-        info = _project_manager.get_project(project_id)
+        info = project_manager.get_project(project_id)
         if info is None:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+
+        _pipeline_manager.stop()
 
         # Swap the DB on the app state
         from Engine.core.state_db import StateDB
         old_db = request.app.state.db
-        if old_db:
-            old_db.close()
-
         new_db = StateDB(info.db_path)
         request.app.state.db = new_db
         request.app.state.current_project_id = project_id
+        _init_token_tracker(new_db)
+
+        if old_db:
+            old_db.close()
 
         return {"message": f"Switched to project '{info.title}'"}
 
@@ -1055,32 +1265,9 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
     @app.post("/api/snapshots")
     def save_snapshot(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         """Save current state as snapshot."""
-        from Engine.core.models import StateSnapshot
-
-        # Gather current state
-        chars_cursor = db.conn.execute("SELECT data FROM characters")
-        ws_cursor = db.conn.execute("SELECT data FROM world_states")
-        chapters_cursor = db.conn.execute("SELECT data FROM chapters")
-
-        characters = [CharacterState.model_validate_json(r[0]).model_dump() for r in chars_cursor.fetchall()]
-        world_states = [{"name": "default", "description": "", "state": "normal"}]
-        chapters_data = [json.loads(r[0]) for r in chapters_cursor.fetchall()]
-
-        # Get max version
-        version_row = db.conn.execute("SELECT MAX(version) FROM snapshots").fetchone()
-        next_version = (version_row[0] or 0) + 1
-
-        snapshot = StateSnapshot(
-            version=next_version,
-            chapter_num=chapters_data[-1].get("chapter_num", 0) if chapters_data else 0,
-            data={
-                "characters": characters,
-                "world_states": world_states,
-                "chapters": chapters_data,
-            },
-        )
-        db.save_snapshot(snapshot)
-        return {"message": f"Snapshot v{next_version} saved", "version": next_version}
+        snapshot = _build_current_snapshot(db)
+        version = db.save_snapshot(snapshot)
+        return {"message": f"Snapshot v{version} saved", "version": version}
 
     @app.post("/api/snapshots/{version}/restore")
     def restore_snapshot(version: int, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
@@ -1089,28 +1276,20 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
         if snapshot is None:
             raise HTTPException(status_code=404, detail=f"Snapshot v{version} not found")
 
-        data = snapshot.data
-        if "characters" in data:
-            for char_data in data["characters"]:
-                char = CharacterState(**char_data)
-                db.update_character(char)
-
+        _restore_snapshot_state(db, snapshot)
         return {"message": f"Restored to snapshot v{version}"}
 
     @app.delete("/api/snapshots/{version}")
     def delete_snapshot(version: int, db: StateDB = Depends(_get_db)) -> Dict[str, str]:
         """Delete a snapshot."""
-        snapshot = db.load_snapshot(version)
-        if snapshot is None:
+        if not db.delete_snapshot(version):
             raise HTTPException(status_code=404, detail=f"Snapshot v{version} not found")
-        db.conn.execute("DELETE FROM snapshots WHERE version = ?", (version,))
-        db.conn.commit()
         return {"message": f"Snapshot v{version} deleted"}
-    api_router = []
 
     @app.get("/api/status")
     def api_status(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         """Get project status from database."""
+        import json
         # Read config from database
         title = "Untitled Novel"
         genre = "fiction"
@@ -1127,20 +1306,23 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
             pass
 
         # Count chapters
-        cursor = db.conn.execute("SELECT data FROM chapters")
+        cursor = db.conn.execute("SELECT chapter_num, title, content, status, word_count, tension_level, created_at, updated_at FROM chapters")
         chapters = []
         for row in cursor.fetchall():
-            chapters.append(json.loads(row[0]))
+            chapters.append({
+                "chapter_num": row[0], "title": row[1], "content": row[2],
+                "status": row[3], "word_count": row[4], "tension_level": row[5],
+                "created_at": row[6], "updated_at": row[7],
+            })
         total_chapters = len(chapters)
         completed = sum(1 for c in chapters if c.get("status") in ("reviewed", "final"))
 
         # Read outline for total chapters
         try:
-            cursor = db.conn.execute("SELECT data FROM outlines LIMIT 1")
+            cursor = db.conn.execute("SELECT title, summary, total_chapters, arc FROM outlines LIMIT 1")
             row = cursor.fetchone()
             if row:
-                outline = json.loads(row[0])
-                total_chapters = max(total_chapters, outline.get("total_chapters", total_chapters))
+                total_chapters = max(total_chapters, row[2] or total_chapters)
         except Exception:
             pass
 
@@ -1199,15 +1381,7 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
 
     @app.get("/api/state/snapshot")
     def api_state_snapshot(db: StateDB = Depends(_get_db)) -> StateSnapshotResponse:
-        chars_cursor = db.conn.execute("SELECT data FROM characters")
-        ws_cursor = db.conn.execute("SELECT data FROM world_states")
-        version_row = db.conn.execute("SELECT MAX(version) FROM snapshots").fetchone()
-        return StateSnapshotResponse(
-            version=version_row[0] or 0,
-            chapter_num=1,
-            characters=[CharacterState.model_validate_json(r[0]).model_dump() for r in chars_cursor.fetchall()],
-            world_states=[{"name": "default", "description": "", "state": "normal"}],
-        )
+        return _current_state_snapshot_response(db)
 
     # --- Phase 3: Value-Add Features ---
 
@@ -1289,54 +1463,71 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
 
     # --- Side Story API ---
     @app.post("/api/side-story/generate")
-    def generate_side_story(body: SideStoryGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+    async def generate_side_story(body: SideStoryGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         """Generate a side story (番外) based on characters and setting."""
         from Engine.agents.side_story import SideStoryAgent
-        config = _get_engine_config(db)
+        config = _get_engine_config_or_http(db)
 
-        agent = SideStoryAgent(
-            model_name=config.role_models.get("writer", config.llm.default_model) if config else "dummy",
-            api_key=config.llm.api_key if config else "",
-            base_url=config.llm.base_url if config else "",
-        )
+        # Use mock if no valid API key or LLM not reachable
+        if not config or not config.llm.api_key or not config.llm.base_url:
+            agent = SideStoryAgent(model_name="dummy")
+            content = agent.run({
+                "characters": body.characters,
+                "setting": body.setting,
+                "topic": body.topic,
+            })
+            return {"content": content}
 
-        if config:
-            import asyncio
-            return {"content": asyncio.get_event_loop().run_until_complete(
-                agent.arun({"characters": body.characters, "setting": body.setting, "topic": body.topic})
-            )}
-
-        content = agent.run({
-            "characters": body.characters,
-            "setting": body.setting,
-            "topic": body.topic,
-        })
-        return {"content": content}
+        try:
+            agent = SideStoryAgent(
+                model_name=config.role_models.get("writer", config.llm.default_model),
+                api_key=config.llm.api_key,
+                base_url=config.llm.base_url,
+            )
+            content = await agent.arun({"characters": body.characters, "setting": body.setting, "topic": body.topic})
+            return {"content": content}
+        except Exception:
+            # Fallback to mock on LLM failure
+            agent = SideStoryAgent(model_name="dummy")
+            content = agent.run({
+                "characters": body.characters,
+                "setting": body.setting,
+                "topic": body.topic,
+            })
+            return {"content": content}
 
     # --- Imitation API ---
     @app.post("/api/imitation/generate")
-    def generate_imitation(body: ImitationGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+    async def generate_imitation(body: ImitationGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         """Generate content imitating the style of a sample text."""
         from Engine.agents.imitation import ImitationAgent
-        config = _get_engine_config(db)
+        config = _get_engine_config_or_http(db)
 
-        agent = ImitationAgent(
-            model_name=config.role_models.get("writer", config.llm.default_model) if config else "dummy",
-            api_key=config.llm.api_key if config else "",
-            base_url=config.llm.base_url if config else "",
-        )
+        # Use mock if no valid API key or LLM not reachable
+        if not config or not config.llm.api_key or not config.llm.base_url:
+            agent = ImitationAgent(model_name="dummy")
+            content = agent.run({
+                "sample_text": body.sample_text,
+                "topic": body.topic,
+            })
+            return {"content": content}
 
-        if config:
-            import asyncio
-            return {"content": asyncio.get_event_loop().run_until_complete(
-                agent.arun({"sample_text": body.sample_text, "topic": body.topic})
-            )}
-
-        content = agent.run({
-            "sample_text": body.sample_text,
-            "topic": body.topic,
-        })
-        return {"content": content}
+        try:
+            agent = ImitationAgent(
+                model_name=config.role_models.get("writer", config.llm.default_model),
+                api_key=config.llm.api_key,
+                base_url=config.llm.base_url,
+            )
+            content = await agent.arun({"sample_text": body.sample_text, "topic": body.topic})
+            return {"content": content}
+        except Exception:
+            # Fallback to mock on LLM failure
+            agent = ImitationAgent(model_name="dummy")
+            content = agent.run({
+                "sample_text": body.sample_text,
+                "topic": body.topic,
+            })
+            return {"content": content}
 
     # --- Style API ---
     @app.post("/api/style/extract")
@@ -1373,6 +1564,125 @@ def create_app(seed_data: bool = True, db_path: str | None = None) -> FastAPI:
                 "tone": profile.tone,
             },
         }
+
+    # --- AI Detection ---
+    @app.post("/api/ai-detect")
+    async def ai_detect(body: AIDetectRequest, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Analyze text for AI-generated patterns."""
+        from Engine.llm.ai_filter import AIFilter
+        from Engine.llm.gateway import LLMGateway
+
+        if not body.text.strip():
+            raise HTTPException(status_code=400, detail="Text is empty")
+
+        # Run rule-based analysis
+        ai_filter = AIFilter(voice_profile={})
+        issues = ai_filter.analyze(body.text)
+        score = ai_filter.score(body.text)
+
+        # Try LLM deep analysis if API key available
+        llm_feedback = ""
+        suggestions: List[str] = []
+        config = _get_engine_config_or_http(db)
+        if config and config.llm.api_key and config.llm.base_url:
+            try:
+                prompt = (
+                    "分析以下文本的AI写作痕迹，返回JSON格式：\n"
+                    '{"human_score": 0-100, "issues": ["问题描述"], "suggestions": ["修改建议"]}\n\n'
+                    f"文本：{body.text[:3000]}"
+                )
+                gateway = LLMGateway(
+                    model=config.role_models.get("writer", config.llm.default_model),
+                    api_key=config.llm.api_key,
+                    base_url=config.llm.base_url,
+                )
+                response = await gateway.chat(messages=[{"role": "user", "content": prompt}])
+                import json as _json
+                result = _json.loads(response)
+                llm_feedback = f"LLM 评分: {result.get('human_score', 'N/A')}/100"
+                suggestions = result.get("suggestions", [])
+            except Exception:
+                llm_feedback = "LLM 分析不可用"
+
+        return {
+            "score": score,
+            "issue_count": len(issues),
+            "issues": [
+                {"type": i.type, "severity": i.severity, "description": i.description}
+                for i in issues
+            ],
+            "llm_feedback": llm_feedback,
+            "suggestions": suggestions,
+        }
+
+    # --- Trend Analysis ---
+    @app.post("/api/trends/analyze")
+    async def analyze_trends(body: TrendAnalyzeRequest, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        """Analyze web novel trends using LLM."""
+        from Engine.llm.gateway import LLMGateway
+
+        config = _get_engine_config_or_http(db)
+
+        if not config or not config.llm.api_key or not config.llm.base_url:
+            # Fallback: return mock data
+            return {
+                "topics": [
+                    {"name": "系统流", "heat": 85, "trend": "up"},
+                    {"name": "克苏鲁", "heat": 72, "trend": "up"},
+                    {"name": "凡人流", "heat": 68, "trend": "stable"},
+                    {"name": "无限流", "heat": 55, "trend": "down"},
+                ],
+                "market_insights": [
+                    "系统流持续热门，读者偏好轻松日常向",
+                    "克苏鲁题材融合东方元素是新兴趋势",
+                    "长篇作品前3章决定留存率，节奏要快",
+                ],
+                "recommendations": [
+                    "开篇直接进入核心冲突，避免大段世界观铺垫",
+                    "每章末尾设置钩子，提高追读率",
+                    "加入轻松元素平衡严肃基调",
+                ],
+                "genre_trends": {
+                    "genre": body.genre or "综合",
+                    "top_tags": ["系统", "轻松", "升级", "日常"],
+                    "emerging_tags": ["克苏鲁", "群像", "幕后流"],
+                    "declining_tags": ["后宫", "无脑爽"],
+                },
+            }
+
+        try:
+            genre_context = f"题材: {body.genre}" if body.genre else ""
+            keyword_context = f"关键词: {', '.join(body.keywords)}" if body.keywords else ""
+            prompt = (
+                f"基于当前网文市场趋势，生成一份趋势分析报告。{genre_context} {keyword_context}\n\n"
+                "返回JSON格式：\n"
+                "{\n"
+                '  "topics": [{"name": "话题名", "heat": 0-100, "trend": "up|stable|down"}],\n'
+                '  "market_insights": ["市场洞察1", ...],\n'
+                '  "recommendations": ["创作建议1", ...],\n'
+                '  "genre_trends": {"genre": "题材", "top_tags": [], "emerging_tags": [], "declining_tags": []}\n'
+                "}\n"
+            )
+            gateway = LLMGateway(
+                model=config.role_models.get("navigator", config.llm.default_model),
+                api_key=config.llm.api_key,
+                base_url=config.llm.base_url,
+            )
+            response = await gateway.chat(messages=[{"role": "user", "content": prompt}])
+            import json as _json
+            return _json.loads(response)
+        except Exception:
+            # Fallback on LLM failure
+            return {
+                "topics": [
+                    {"name": "系统流", "heat": 85, "trend": "up"},
+                    {"name": "克苏鲁", "heat": 72, "trend": "up"},
+                    {"name": "凡人流", "heat": 68, "trend": "stable"},
+                ],
+                "market_insights": ["LLM 分析失败，显示默认数据"],
+                "recommendations": ["开篇直接进入核心冲突"],
+                "genre_trends": {"genre": body.genre or "综合", "top_tags": [], "emerging_tags": [], "declining_tags": []},
+            }
 
     # --- Static file serving for React SPA ---
     FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")

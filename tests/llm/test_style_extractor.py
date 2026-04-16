@@ -59,12 +59,16 @@ def test_style_profile_consistency():
     assert p1.tone == p2.tone
 
 
-def test_style_extractor_integration_via_api():
+def test_style_extractor_integration_via_api(tmp_path):
     """Integration test: verify style extraction works via API endpoint."""
     from fastapi.testclient import TestClient
     from Studio.api import create_app
 
-    app = create_app(seed_data=False, db_path=":memory:")
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
     with TestClient(app) as client:
         response = client.post("/api/style/extract", json={
             "text": "他走进了房间，仿佛回到了过去。",
@@ -75,12 +79,16 @@ def test_style_extractor_integration_via_api():
         assert "tone" in data
 
 
-def test_style_fingerprint_via_api():
+def test_style_fingerprint_via_api(tmp_path):
     """Integration test: verify fingerprint generation via API endpoint."""
     from fastapi.testclient import TestClient
     from Studio.api import create_app
 
-    app = create_app(seed_data=False, db_path=":memory:")
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
     with TestClient(app) as client:
         response = client.post("/api/style/fingerprint", json={
             "text": "他走进了房间。「你好」他问道。",

@@ -5,6 +5,7 @@ from Engine.core.filter import StateFilter
 from Engine.core.models import (
     Chapter, Outline, CharacterProfile, CharacterRelationship,
     WorldBuilding, PowerSystem, Timeline,
+    CharacterState, StateSnapshot, WorldState,
 )
 
 
@@ -262,3 +263,58 @@ def test_add_timeline_event(db):
     assert len(events) == 1
     assert events[0].year == 1
     assert events[0].event == "The beginning"
+
+
+def test_save_and_load_snapshot_round_trip(db):
+    snapshot = StateSnapshot(
+        version=1,
+        chapter_num=2,
+        characters=[CharacterState(name="Hero", role="Lead", status="active")],
+        world_states=[WorldState(name="Capital", description="Snow city", state="stable")],
+        summary="checkpoint",
+        metadata={
+            "chapters": [
+                {"chapter_num": 2, "title": "Saved", "content": "content"},
+            ]
+        },
+    )
+
+    db.save_snapshot(snapshot)
+
+    loaded = db.load_snapshot(1)
+
+    assert loaded is not None
+    assert loaded.version == 1
+    assert loaded.chapter_num == 2
+    assert loaded.summary == "checkpoint"
+    assert len(loaded.characters) == 1
+    assert loaded.characters[0].name == "Hero"
+    assert len(loaded.world_states) == 1
+    assert loaded.world_states[0].name == "Capital"
+    assert loaded.metadata["chapters"][0]["chapter_num"] == 2
+
+
+def test_list_snapshots_returns_snapshots_in_version_order(db):
+    db.save_snapshot(StateSnapshot(version=2, chapter_num=2))
+    db.save_snapshot(StateSnapshot(version=1, chapter_num=1))
+
+    snapshots = db.list_snapshots()
+
+    assert [snapshot.version for snapshot in snapshots] == [1, 2]
+
+
+def test_load_snapshot_returns_none_for_missing_version(db):
+    assert db.load_snapshot(999) is None
+
+
+def test_delete_snapshot_removes_snapshot(db):
+    db.save_snapshot(StateSnapshot(version=1, chapter_num=1))
+
+    deleted = db.delete_snapshot(1)
+
+    assert deleted is True
+    assert db.load_snapshot(1) is None
+
+
+def test_delete_snapshot_returns_false_for_missing_version(db):
+    assert db.delete_snapshot(999) is False

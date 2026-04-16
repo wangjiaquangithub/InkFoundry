@@ -1,6 +1,30 @@
 import axios from "axios";
 import type { Outline, CharacterProfile, WorldBuilding } from "../types";
 
+export interface SnapshotRecord {
+  version: number;
+  chapter_num: number;
+  characters: Array<{ name: string; role: string; status: string }>;
+  world_states: Array<{ name: string; description: string; state: string }>;
+  summary: string;
+  metadata: {
+    chapters?: Array<{
+      chapter_num: number;
+      title: string;
+      content: string;
+      status: string;
+      word_count: number;
+      tension_level: number;
+      version: number;
+      review_notes: string;
+      agent_results: Record<string, unknown> | string;
+      created_at: string;
+      updated_at: string;
+    }>;
+    [key: string]: unknown;
+  };
+}
+
 const API_BASE = "";
 
 const client = axios.create({
@@ -66,7 +90,7 @@ export const api = {
 
   // Configuration
   getConfig: () => client.get("/api/config"),
-  saveConfig: (data: Record<string, any>) => client.post("/api/config", data),
+  saveConfig: (data: Record<string, unknown>) => client.post("/api/config", data),
   resetConfig: () => client.delete("/api/config"),
 
   // Power Systems
@@ -104,10 +128,10 @@ export const api = {
   getTokenRecords: () => client.get("/api/token-records"),
 
   // Snapshots
-  saveSnapshot: () => client.post("/api/snapshots"),
-  listSnapshots: () => client.get("/api/snapshots"),
-  restoreSnapshot: (version: number) => client.post(`/api/snapshots/${version}/restore`),
-  deleteSnapshot: (version: number) => client.delete(`/api/snapshots/${version}`),
+  saveSnapshot: () => client.post<{ message: string; version: number }>("/api/snapshots"),
+  listSnapshots: () => client.get<{ snapshots: SnapshotRecord[] }>("/api/snapshots"),
+  restoreSnapshot: (version: number) => client.post<{ message: string }>(`/api/snapshots/${version}/restore`),
+  deleteSnapshot: (version: number) => client.delete<{ message: string }>(`/api/snapshots/${version}`),
 
   // Phase 3: Value-Add Features
   // Daemon
@@ -135,6 +159,14 @@ export const api = {
     client.post("/api/style/extract", { text }),
   getStyleFingerprint: (text: string) =>
     client.post("/api/style/fingerprint", { text }),
+
+  // AI Detection
+  aiDetect: (text: string) =>
+    client.post("/api/ai-detect", { text }),
+
+  // Trend Analysis
+  analyzeTrends: (data: { genre?: string; keywords?: string[] }) =>
+    client.post("/api/trends/analyze", data),
 };
 
 export default api;

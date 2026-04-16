@@ -267,15 +267,41 @@ class StateDB:
 
     # --- Snapshot Management ---
 
-    def save_snapshot(self, snapshot: StateSnapshot) -> None:
-        """Save a state snapshot."""
+    def save_snapshot(self, snapshot: StateSnapshot) -> int:
+        """Save a state snapshot and return its persisted version."""
         self._ensure_open()
         with self.lock:
             with self.conn:
+                if snapshot.version <= 0:
+                    placeholder_snapshot = snapshot.model_copy(update={"version": 0})
+                    cursor = self.conn.execute(
+                        "INSERT INTO snapshots (chapter_num, data) VALUES (?, ?)",
+                        (
+                            placeholder_snapshot.chapter_num,
+                            placeholder_snapshot.model_dump_json(),
+                        ),
+                    )
+                    version = cursor.lastrowid
+                    persisted_snapshot = snapshot.model_copy(update={"version": version})
+                    self.conn.execute(
+                        "UPDATE snapshots SET chapter_num = ?, data = ? WHERE version = ?",
+                        (
+                            persisted_snapshot.chapter_num,
+                            persisted_snapshot.model_dump_json(),
+                            version,
+                        ),
+                    )
+                    return version
+
                 self.conn.execute(
                     "INSERT OR REPLACE INTO snapshots (version, chapter_num, data) VALUES (?, ?, ?)",
-                    (snapshot.version, snapshot.chapter_num, snapshot.model_dump_json()),
+                    (
+                        snapshot.version,
+                        snapshot.chapter_num,
+                        snapshot.model_dump_json(),
+                    ),
                 )
+                return snapshot.version
 
     def load_snapshot(self, version: int) -> Optional[StateSnapshot]:
         """Load a state snapshot by version."""
@@ -295,6 +321,16 @@ class StateDB:
             "SELECT data FROM snapshots ORDER BY version ASC"
         )
         return [StateSnapshot.model_validate_json(row[0]) for row in cursor.fetchall()]
+
+    def delete_snapshot(self, version: int) -> bool:
+        """Delete a snapshot by version."""
+        self._ensure_open()
+        with self.lock:
+            with self.conn:
+                cursor = self.conn.execute(
+                    "DELETE FROM snapshots WHERE version = ?", (version,)
+                )
+                return cursor.rowcount > 0
 
     # --- Chapter CRUD ---
 

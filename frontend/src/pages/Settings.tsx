@@ -1,57 +1,47 @@
+import axios from "axios";
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
+import type { SnapshotRecord } from "../api/client";
 import { Button } from "../components/ui/button";
 
-interface TokenStats {
-  total_prompt_tokens: number;
-  total_completion_tokens: number;
-  total_tokens: number;
-  total_requests: number;
-  total_cost_estimate: number;
-  by_model: Record<string, number>;
-  by_task: Record<string, number>;
-}
-
-interface Snapshot {
+interface SnapshotHistoryItem {
   version: number;
   chapter_num: number;
   created_at?: string;
-  characters: any[];
-  world_states: any[];
+  characters: number;
+  world_states: number;
 }
 
+const DEFAULT_CONFIG = {
+  llm_api_key: "",
+  llm_base_url: "https://coding.dashscope.aliyuncs.com/v1",
+  default_model: "qwen3.6-plus",
+  writer_model: "",
+  editor_model: "",
+  redteam_model: "",
+  navigator_model: "",
+  director_model: "",
+  review_mode: "strict",
+  max_retries: 3,
+  pipeline_parallel: false,
+};
+
+type ConfigState = typeof DEFAULT_CONFIG;
+
 export function Settings() {
-  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const [config, setConfig] = useState({
-    llm_api_key: "",
-    llm_base_url: "https://api.openai.com/v1",
-    default_model: "qwen-plus",
-    writer_model: "",
-    editor_model: "",
-    redteam_model: "",
-    navigator_model: "",
-    director_model: "",
-    review_mode: "strict",
-    max_retries: 3,
-    pipeline_parallel: false,
-  });
-
-  // Token stats
-  const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
-  const [_tokenRecords, setTokenRecords] = useState<any[]>([]);
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
 
   // Snapshots
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [snapshots, setSnapshots] = useState<SnapshotHistoryItem[]>([]);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState<number | null>(null);
 
   useEffect(() => {
     loadConfig();
-    loadTokenStats();
     loadSnapshots();
   }, []);
 
@@ -60,9 +50,9 @@ export function Settings() {
     try {
       const res = await api.getConfig();
       setConfig({
-        llm_api_key: res.data.llm_api_key || "",
-        llm_base_url: res.data.llm_base_url || "https://api.openai.com/v1",
-        default_model: res.data.default_model || "qwen-plus",
+        llm_api_key: "",
+        llm_base_url: res.data.llm_base_url || "https://coding.dashscope.aliyuncs.com/v1",
+        default_model: res.data.default_model || "qwen3.6-plus",
         writer_model: res.data.writer_model || "",
         editor_model: res.data.editor_model || "",
         redteam_model: res.data.redteam_model || "",
@@ -79,32 +69,22 @@ export function Settings() {
     }
   };
 
-  const loadTokenStats = async () => {
-    try {
-      const [statsRes, recordsRes] = await Promise.all([
-        api.getTokenStats(),
-        api.getTokenRecords(),
-      ]);
-      setTokenStats(statsRes.data);
-      setTokenRecords(recordsRes.data.records || []);
-    } catch {
-      console.error("Failed to load token stats");
-    }
-  };
-
   const loadSnapshots = async () => {
     try {
-      const res = await api.getStateSnapshot();
-      // Snapshots are currently not exposed via a separate list endpoint
-      // For now, we show the current version from the state snapshot
-      setSnapshots([{
-        version: res.data.version,
-        chapter_num: res.data.chapter_num,
-        characters: res.data.characters,
-        world_states: res.data.world_states,
-      }]);
+      const res = await api.listSnapshots();
+      setSnapshots(
+        res.data.snapshots.map((snapshot: SnapshotRecord) => ({
+          version: snapshot.version,
+          chapter_num: snapshot.chapter_num,
+          created_at: undefined,
+          characters: snapshot.characters.length,
+          world_states: snapshot.world_states.length,
+        }))
+      );
+      setSnapshotError(null);
     } catch {
       console.error("Failed to load snapshots");
+      setSnapshotError("版本历史加载失败，请稍后重试");
     }
   };
 
@@ -115,7 +95,7 @@ export function Settings() {
       await api.restoreSnapshot(version);
       alert("回滚成功");
       loadSnapshots();
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Failed to restore snapshot:", e);
       alert("回滚失败");
     } finally {
@@ -127,37 +107,43 @@ export function Settings() {
     setSaving(true);
     setSaved(false);
     try {
-      await api.saveConfig(config);
+      const payload: Partial<ConfigState> = { ...config };
+      if (!payload.llm_api_key?.trim()) {
+        delete payload.llm_api_key;
+      }
+      await api.saveConfig(payload);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Failed to save config:", e);
+      const detail = axios.isAxiosError(e)
+        ? (() => {
+            const data = e.response?.data as { detail?: unknown } | undefined;
+            if (typeof data?.detail === "string") return data.detail;
+            if (Array.isArray(data?.detail)) {
+              return data.detail
+                .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+                .join("; ");
+            }
+            if (data?.detail) return JSON.stringify(data.detail);
+            return undefined;
+          })()
+        : undefined;
+      alert("保存失败: " + (detail || (e instanceof Error ? e.message : "未知错误")));
     } finally {
       setSaving(false);
     }
   };
 
   const handleReset = async () => {
-    if (!confirm("确定要重置所有配置吗？此操作将删除所有 API 密钥和模型设置。")) return;
+    if (!confirm("确定要重置当前项目的配置吗？此操作将删除已保存的 API 密钥、模型和流水线设置。")) return;
     setResetting(true);
     try {
       await api.resetConfig();
-      setConfig({
-        llm_api_key: "",
-        llm_base_url: "https://api.openai.com/v1",
-        default_model: "qwen-plus",
-        writer_model: "",
-        editor_model: "",
-        redteam_model: "",
-        navigator_model: "",
-        director_model: "",
-        review_mode: "strict",
-        max_retries: 3,
-        pipeline_parallel: false,
-      });
+      await loadConfig();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Failed to reset config:", e);
       alert("重置失败，请重试");
     } finally {
@@ -165,28 +151,19 @@ export function Settings() {
     }
   };
 
-  const update = (field: string, value: any) => {
+  const update = <K extends keyof ConfigState>(field: K, value: ConfigState[K]) => {
     setConfig((prev) => ({ ...prev, [field]: value }));
   };
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-gray-400">加载配置中...</p>
-      </div>
-    );
+    return <div className="flex items-center justify-center h-full"><p className="text-gray-400">加载配置中...</p></div>;
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="outline" size="sm" onClick={() => navigate("/workspace")}>
-            返回工作区
-          </Button>
-          <h1 className="text-xl font-bold">设置</h1>
-        </div>
+    <div className="h-full overflow-auto p-6">
+      {/* Toolbar */}
+      <div className="flex justify-between items-center mb-6">
+        <h2 className="text-lg font-semibold">设置</h2>
         <div className="flex items-center gap-3">
           {saved && (
             <span className="text-sm text-green-500">已保存</span>
@@ -195,9 +172,9 @@ export function Settings() {
             {saving ? "保存中..." : "保存设置"}
           </Button>
         </div>
-      </header>
+      </div>
 
-      <div className="max-w-3xl mx-auto p-6 space-y-6">
+      <div className="max-w-3xl space-y-6">
         {/* API Configuration */}
         <div className="bg-white rounded-xl border p-6">
           <h2 className="font-semibold mb-4">API 配置</h2>
@@ -222,7 +199,7 @@ export function Settings() {
                 value={config.llm_base_url}
                 onChange={(e) => update("llm_base_url", e.target.value)}
                 className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="https://api.openai.com/v1"
+                placeholder="https://coding.dashscope.aliyuncs.com/v1"
               />
               <p className="text-xs text-gray-400 mt-1">
                 兼容 OpenAI 格式的 API 地址
@@ -242,7 +219,7 @@ export function Settings() {
                 value={config.default_model}
                 onChange={(e) => update("default_model", e.target.value)}
                 className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="例如: qwen-plus, claude-sonnet-4-6"
+                placeholder="例如: qwen3.6-plus, claude-sonnet-4-6"
               />
               <p className="text-xs text-gray-400 mt-1">
                 用于大多数章节生成的默认模型
@@ -326,63 +303,12 @@ export function Settings() {
           </div>
         </div>
 
-        {/* Token Stats */}
-        {tokenStats && (
-          <div className="bg-white rounded-xl border p-6">
-            <h2 className="font-semibold mb-4">Token 统计</h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-              <div className="bg-gray-50 rounded-lg p-4">
-                <p className="text-xs text-gray-400 mb-1">总 Token</p>
-                <p className="text-xl font-bold">{tokenStats.total_tokens.toLocaleString()}</p>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-4">
-                <p className="text-xs text-gray-400 mb-1">请求次数</p>
-                <p className="text-xl font-bold">{tokenStats.total_requests}</p>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-4">
-                <p className="text-xs text-gray-400 mb-1">Prompt Tokens</p>
-                <p className="text-xl font-bold">{tokenStats.total_prompt_tokens.toLocaleString()}</p>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-4">
-                <p className="text-xs text-gray-400 mb-1">预估费用 ($)</p>
-                <p className="text-xl font-bold">${tokenStats.total_cost_estimate.toFixed(6)}</p>
-              </div>
-            </div>
-            {/* By Model */}
-            {Object.keys(tokenStats.by_model).length > 0 && (
-              <div className="mb-4">
-                <h3 className="text-sm font-medium mb-2">各模型用量</h3>
-                <div className="space-y-2">
-                  {Object.entries(tokenStats.by_model).map(([model, tokens]) => (
-                    <div key={model} className="flex justify-between text-sm">
-                      <span>{model}</span>
-                      <span className="text-gray-500">{tokens.toLocaleString()} tokens</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {/* By Task */}
-            {Object.keys(tokenStats.by_task).length > 0 && (
-              <div>
-                <h3 className="text-sm font-medium mb-2">各任务用量</h3>
-                <div className="space-y-2">
-                  {Object.entries(tokenStats.by_task).map(([task, tokens]) => (
-                    <div key={task} className="flex justify-between text-sm">
-                      <span>{task}</span>
-                      <span className="text-gray-500">{tokens.toLocaleString()} tokens</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
         {/* Snapshot Management */}
         <div className="bg-white rounded-xl border p-6">
           <h2 className="font-semibold mb-4">版本历史</h2>
-          {snapshots.length === 0 ? (
+          {snapshotError ? (
+            <p className="text-sm text-red-500">{snapshotError}</p>
+          ) : snapshots.length === 0 ? (
             <p className="text-sm text-gray-400">暂无快照数据</p>
           ) : (
             <div className="space-y-2">
@@ -391,7 +317,7 @@ export function Settings() {
                   <div>
                     <p className="font-medium">版本 {s.version}</p>
                     <p className="text-xs text-gray-400">
-                      章节 {s.chapter_num} · {s.characters.length} 个角色
+                      章节 {s.chapter_num} · {s.characters} 个角色 · {s.world_states} 个世界状态
                     </p>
                   </div>
                   <Button
@@ -414,8 +340,8 @@ export function Settings() {
           <div className="space-y-3">
             <div className="flex justify-between items-center">
               <div>
-                <p className="font-medium">重置所有数据</p>
-                <p className="text-sm text-gray-400">删除所有章节、角色和设置</p>
+                <p className="font-medium">重置配置</p>
+                <p className="text-sm text-gray-400">删除当前项目保存的 API 密钥、模型和流水线设置</p>
               </div>
               <Button
                 variant="outline"

@@ -5,9 +5,13 @@ from Studio.api import create_app
 
 
 @pytest.fixture
-def client():
+def client(tmp_path):
     """Provide a test client with seed data."""
-    app = create_app(seed_data=True, db_path=":memory:")
+    app = create_app(
+        seed_data=True,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
     with TestClient(app) as c:
         yield c
 
