@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api/client";
+import { api, type ApiStatusResponse } from "../api/client";
 import { useAppContext } from "../app-context";
 import { Button } from "../components/ui/button";
 import { getCoreChainReadiness } from "../lib/core-chain-readiness";
@@ -28,59 +28,87 @@ export function Outline() {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [generationMode, setGenerationMode] = useState<"model" | "fallback" | null>(null);
-  const [hasRealModel, setHasRealModel] = useState<boolean | null>(null);
-  const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [statusSnapshot, setStatusSnapshot] = useState<ApiStatusResponse | null>(null);
+  const [outlineAvailability, setOutlineAvailability] = useState<boolean | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadOutline = async () => {
+      setLoading(true);
+      setGenerationMode(null);
+      setSuccessMessage(null);
+      const [outlineRes, statusRes] = await Promise.allSettled([api.getOutline(), api.status()]);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (outlineRes.status === "fulfilled") {
+        setOutline(outlineRes.value.data.outline);
+        setOutlineAvailability(Boolean(outlineRes.value.data.outline));
+      } else {
+        setOutline(null);
+        setOutlineAvailability(null);
+        setGenerationMode(null);
+      }
+
+      if (statusRes.status === "fulfilled") {
+        setStatusSnapshot(statusRes.value.data);
+      } else {
+        setStatusSnapshot(null);
+      }
+
+      setLoading(false);
+    };
+
     void loadOutline();
+
     return () => {
-      if (navTimerRef.current) clearTimeout(navTimerRef.current);
+      cancelled = true;
     };
   }, [currentBook?.id]);
-
-  const loadOutline = async () => {
-    setLoading(true);
-    setGenerationMode(null);
-    const [outlineRes, configRes] = await Promise.allSettled([api.getOutline(), api.getConfig()]);
-
-    if (outlineRes.status === "fulfilled") {
-      setOutline(outlineRes.value.data.outline);
-    } else {
-      setOutline(null);
-      setGenerationMode(null);
-    }
-
-    if (configRes.status === "fulfilled") {
-      setHasRealModel(Boolean(configRes.value.data.llm_api_key_masked || configRes.value.data.llm_api_key));
-    } else {
-      setHasRealModel(null);
-    }
-
-    setLoading(false);
-  };
 
   const handleGenerate = async () => {
     if (!currentBook) {
       setError("请先进入一个项目");
       return;
     }
-    if (!currentBook.summary.trim()) {
+
+    if (statusSnapshot?.core_chain_readiness?.project_brief_ready === false) {
       setError("请先回到项目页填写故事简介，再生成大纲");
       return;
     }
 
     setGenerating(true);
     setError(null);
+    setSuccessMessage(null);
     try {
       const res = await api.generateOutline({
         genre: currentBook.genre,
         title: currentBook.title,
-        summary: currentBook.summary,
+        summary: currentBook.summary.trim() ? currentBook.summary : undefined,
         total_chapters: currentBook.targetChapters || DEFAULT_OUTLINE_CHAPTERS,
       });
       setOutline(res.data.outline);
+      setOutlineAvailability(true);
       setGenerationMode(res.data.mode);
-      navTimerRef.current = setTimeout(() => navigate("/chapters"), 1500);
+      let statusFacts = statusSnapshot?.core_chain_readiness ?? null;
+      try {
+        const statusRes = await api.status();
+        setStatusSnapshot(statusRes.data);
+        statusFacts = statusRes.data.core_chain_readiness;
+      } catch {
+        setStatusSnapshot(null);
+      }
+      setSuccessMessage(
+        statusFacts?.real_model_ready === true
+          ? "大纲已生成，下一步可以直接进入章节页开始创作。"
+          : statusFacts?.real_model_ready === false
+            ? "大纲已生成，下一步请先去设置模型，再进入章节页开始创作。"
+            : "大纲已生成，下一步可去设置页检查模型状态，或刷新后再继续。"
+      );
     } catch (e: unknown) {
       setError(getErrorMessage(e));
     } finally {
@@ -93,16 +121,29 @@ export function Outline() {
   }
 
   const chainReadiness = getCoreChainReadiness({
-    hasProjectSummary: Boolean(currentBook?.summary.trim()),
-    hasOutline: Boolean(outline),
-    hasRealModel,
+    hasProjectSummary: statusSnapshot ? Boolean(currentBook?.summary.trim()) : null,
+    hasOutline: outline ? true : outlineAvailability,
+    hasRealModel: statusSnapshot?.core_chain_readiness?.real_model_ready ?? null,
+    facts: statusSnapshot?.core_chain_readiness,
   });
+  const backendExplicitlyBlocksOutline = statusSnapshot?.core_chain_readiness?.project_brief_ready === false;
+  const canTriggerOutlineGeneration = !backendExplicitlyBlocksOutline && !generating;
+  const outlineGenerateBlockReason = generating
+    ? "正在生成大纲"
+    : backendExplicitlyBlocksOutline
+      ? "回到项目页补全简介"
+      : chainReadiness.nextAction;
 
   return (
     <div className="h-full overflow-auto">
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-lg mx-6 mt-4">
           {error}
+        </div>
+      )}
+      {successMessage && (
+        <div className="bg-green-50 border border-green-200 text-green-700 p-4 rounded-lg mx-6 mt-4">
+          {successMessage}
         </div>
       )}
 
@@ -114,7 +155,7 @@ export function Outline() {
                 <div className="text-5xl mb-4 animate-pulse">⚙️</div>
                 <h2 className="text-xl font-semibold mb-2">正在生成大纲...</h2>
                 <p className="text-gray-400 mb-6">AI 正在根据你的题材和简介生成完整的故事结构</p>
-                <div className="text-sm text-blue-500">生成完成后将自动跳转到章节页面</div>
+                <div className="text-sm text-blue-500">生成完成后会留在当前页，方便你确认下一步。</div>
               </>
             ) : (
               <>
@@ -134,8 +175,8 @@ export function Outline() {
                 <p className="mb-6 text-xs text-gray-500">下一步：{chainReadiness.nextAction}</p>
                 <Button
                   onClick={handleGenerate}
-                  disabled={generating || !chainReadiness.canGenerateOutline}
-                  title={!chainReadiness.canGenerateOutline ? chainReadiness.nextAction : undefined}
+                  disabled={!canTriggerOutlineGeneration}
+                  title={!canTriggerOutlineGeneration ? outlineGenerateBlockReason : undefined}
                 >
                   {generating ? "生成中..." : "生成大纲"}
                 </Button>
@@ -150,15 +191,43 @@ export function Outline() {
             <h2 className="text-lg font-semibold mb-3">{outline.title}</h2>
             <p className="text-gray-600 mb-4">{outline.summary || "暂无简介"}</p>
             <div className="flex flex-wrap gap-4 text-sm text-gray-500">
-              <span>总章数: {outline.total_chapters}</span>
-              <span>结构: {outline.arc}</span>
-              <span>生成模式: {generationMode === "model" ? "真实模型" : generationMode === "fallback" ? "模板降级" : "未知"}</span>
+              <span>总章数：{outline.total_chapters}</span>
+              <span>结构：{outline.arc}</span>
+              <span>
+                生成模式：
+                {generationMode === "model"
+                  ? "真实模型"
+                  : generationMode === "fallback"
+                    ? "模板降级"
+                    : "沿用已有大纲"}
+              </span>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-gray-500">
               <span className={`rounded-full px-2.5 py-1 ${chainReadiness.badgeClassName}`}>
                 链路状态：{chainReadiness.label}
               </span>
               <span>下一步：{chainReadiness.nextAction}</span>
+            </div>
+            <div className="mt-4 rounded-lg border bg-gray-50 p-4">
+              <div className="text-sm font-medium text-gray-900">下一步建议</div>
+              <p className="mt-1 text-sm text-gray-600">{chainReadiness.description}</p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {chainReadiness.primaryAction.route ? (
+                  <Button onClick={() => navigate(chainReadiness.primaryAction.route!)}>
+                    {chainReadiness.primaryAction.label}
+                  </Button>
+                ) : null}
+                <Button
+                  variant="outline"
+                  onClick={() => navigate("/chapters")}
+                  disabled={!chainReadiness.canGenerateChapter}
+                  title={!chainReadiness.canGenerateChapter ? chainReadiness.nextAction : undefined}
+                >
+                  去章节页
+                </Button>
+                <Button variant="outline" onClick={() => navigate("/settings")}>去设置模型</Button>
+                <Button variant="outline" onClick={() => navigate("/")}>返回项目页</Button>
+              </div>
             </div>
             {outline.genre_rules.length > 0 && (
               <div className="mt-4">
@@ -228,7 +297,12 @@ export function Outline() {
 
           {/* Toolbar */}
           <div className="flex justify-end mt-4">
-            <Button variant="outline" onClick={handleGenerate} disabled={generating}>
+            <Button
+              variant="outline"
+              onClick={handleGenerate}
+              disabled={!canTriggerOutlineGeneration}
+              title={!canTriggerOutlineGeneration ? outlineGenerateBlockReason : undefined}
+            >
               {generating ? "生成中..." : "重新生成"}
             </Button>
           </div>

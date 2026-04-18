@@ -1,5 +1,11 @@
 import axios from "axios";
-import type { Outline, CharacterProfile, WorldBuilding, NovelProject } from "../types";
+import type {
+  CharacterProfile,
+  CoreChainReadinessFacts,
+  NovelProject,
+  Outline,
+  WorldBuilding,
+} from "../types";
 
 export interface ProjectRecord {
   id: string;
@@ -13,6 +19,7 @@ export interface ProjectRecord {
   total_chapters?: number;
   latest_chapter?: number;
   outline_total_chapters?: number;
+  core_chain_readiness: CoreChainReadinessFacts;
 }
 
 export interface OutlineGenerateResponse {
@@ -29,14 +36,11 @@ export interface ChapterRunResponse {
   mode?: "model" | "fallback";
 }
 
-export interface ApiStatusResponse {
-  id: string;
-  title: string;
-  genre: string;
-  current_chapter: number;
-  total_chapters: number;
-  status: NovelProject["status"];
+export interface ApiStatusResponse extends NovelProject {
+  core_chain_readiness: CoreChainReadinessFacts;
 }
+
+export type ExportFormat = "txt" | "md" | "html";
 
 export interface SnapshotRecord {
   version: number;
@@ -149,7 +153,7 @@ export const api = {
   getStateSnapshot: () => client.get("/api/state/snapshot"),
 
   // Export
-  exportNovel: (format: string) =>
+  exportNovel: (format: ExportFormat) =>
     client.post("/api/export", { format }),
 
   // Projects

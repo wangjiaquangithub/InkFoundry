@@ -1,6 +1,6 @@
 import axios from "axios";
-import { useState, useEffect } from "react";
-import { api } from "../api/client";
+import { useEffect, useRef, useState } from "react";
+import { api, type ApiStatusResponse } from "../api/client";
 import type { SnapshotRecord } from "../api/client";
 import { useAppContext } from "../app-context";
 import { Button } from "../components/ui/button";
@@ -37,84 +37,107 @@ export function Settings() {
   const [saved, setSaved] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
-  const [hasSavedModel, setHasSavedModel] = useState<boolean | null>(null);
-  const [hasOutline, setHasOutline] = useState<boolean | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [pageNotice, setPageNotice] = useState<string | null>(null);
+  const [statusSnapshot, setStatusSnapshot] = useState<ApiStatusResponse | null>(null);
+  const [configLoaded, setConfigLoaded] = useState(false);
 
   // Snapshots
   const [snapshots, setSnapshots] = useState<SnapshotHistoryItem[]>([]);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState<number | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<number | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const savedResetTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
-    loadConfig();
-    loadSnapshots();
-    void loadOutlineState();
-  }, [currentBook?.id]);
+    let cancelled = false;
 
-  const loadConfig = async () => {
-    setLoading(true);
-    try {
-      const res = await api.getConfig();
-      setConfig({
-        llm_api_key: "",
-        llm_base_url: res.data.llm_base_url || "https://coding.dashscope.aliyuncs.com/v1",
-        default_model: res.data.default_model || "qwen3.6-plus",
-        writer_model: res.data.writer_model || "",
-        editor_model: res.data.editor_model || "",
-        redteam_model: res.data.redteam_model || "",
-        navigator_model: res.data.navigator_model || "",
-        director_model: res.data.director_model || "",
-        review_mode: res.data.review_mode || "strict",
-        max_retries: res.data.max_retries || 3,
-        pipeline_parallel: res.data.pipeline_parallel || false,
-      });
-      setHasSavedModel(Boolean(res.data.llm_api_key_masked || res.data.llm_api_key));
-    } catch {
-      console.error("Failed to load config");
-      setHasSavedModel(null);
-    } finally {
+    const loadPageState = async () => {
+      setLoading(true);
+      setPageError(null);
+      const [configRes, snapshotsRes, statusRes] = await Promise.allSettled([
+        api.getConfig(),
+        api.listSnapshots(),
+        api.status(),
+      ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (configRes.status === "fulfilled") {
+        const configData = configRes.value.data;
+        setConfig({
+          llm_api_key: "",
+          llm_base_url: configData.llm_base_url || "https://coding.dashscope.aliyuncs.com/v1",
+          default_model: configData.default_model || "qwen3.6-plus",
+          writer_model: configData.writer_model || "",
+          editor_model: configData.editor_model || "",
+          redteam_model: configData.redteam_model || "",
+          navigator_model: configData.navigator_model || "",
+          director_model: configData.director_model || "",
+          review_mode: configData.review_mode || "strict",
+          max_retries: configData.max_retries || 3,
+          pipeline_parallel: configData.pipeline_parallel || false,
+        });
+        setConfigLoaded(true);
+      } else {
+        setConfig(DEFAULT_CONFIG);
+        setConfigLoaded(false);
+        setPageError("当前项目配置加载失败，请刷新后重试；在恢复成功前已禁用保存，避免覆盖现有配置。");
+      }
+
+      if (snapshotsRes.status === "fulfilled") {
+        setSnapshots(
+          snapshotsRes.value.data.snapshots.map((snapshot: SnapshotRecord) => ({
+            version: snapshot.version,
+            chapter_num: snapshot.chapter_num,
+            created_at: undefined,
+            characters: snapshot.characters.length,
+            world_states: snapshot.world_states.length,
+          }))
+        );
+        setSnapshotError(null);
+      } else {
+        setSnapshotError("版本历史加载失败，请稍后重试");
+      }
+
+      if (statusRes.status === "fulfilled") {
+        setStatusSnapshot(statusRes.value.data);
+      } else {
+        setStatusSnapshot(null);
+      }
+
       setLoading(false);
-    }
-  };
+    };
 
-  const loadSnapshots = async () => {
-    try {
-      const res = await api.listSnapshots();
-      setSnapshots(
-        res.data.snapshots.map((snapshot: SnapshotRecord) => ({
-          version: snapshot.version,
-          chapter_num: snapshot.chapter_num,
-          created_at: undefined,
-          characters: snapshot.characters.length,
-          world_states: snapshot.world_states.length,
-        }))
-      );
-      setSnapshotError(null);
-    } catch {
-      console.error("Failed to load snapshots");
-      setSnapshotError("版本历史加载失败，请稍后重试");
-    }
-  };
+    void loadPageState();
 
-  const loadOutlineState = async () => {
-    try {
-      const res = await api.getOutline();
-      setHasOutline(Boolean(res.data.outline));
-    } catch {
-      setHasOutline(false);
-    }
-  };
+    return () => {
+      cancelled = true;
+    };
+  }, [currentBook?.id, refreshKey]);
+
+  useEffect(() => {
+    return () => {
+      if (savedResetTimeoutRef.current !== null) {
+        window.clearTimeout(savedResetTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleRestoreSnapshot = async (version: number) => {
-    if (!confirm(`确定要回滚到版本 ${version} 吗？当前状态将被覆盖。`)) return;
     setRestoring(version);
+    setPageError(null);
     try {
       await api.restoreSnapshot(version);
-      alert("回滚成功");
-      loadSnapshots();
+      setRestoreTarget(null);
+      setPageNotice(`已回滚到版本 ${version}。`);
+      setRefreshKey((value) => value + 1);
     } catch (e: unknown) {
-      console.error("Failed to restore snapshot:", e);
-      alert("回滚失败");
+      setPageError(axios.isAxiosError(e) ? e.message : "回滚失败");
     } finally {
       setRestoring(null);
     }
@@ -123,16 +146,30 @@ export function Settings() {
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
+    setPageError(null);
+    setPageNotice(null);
     try {
       const payload: Partial<ConfigState> = { ...config };
       if (!payload.llm_api_key?.trim()) {
         delete payload.llm_api_key;
       }
+      if (!configLoaded) {
+        setPageError("当前项目配置尚未成功加载，暂时不能保存。请刷新后重试。");
+        return;
+      }
+
       await api.saveConfig(payload);
+      setRefreshKey((value) => value + 1);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      setPageNotice("配置已保存。");
+      if (savedResetTimeoutRef.current !== null) {
+        window.clearTimeout(savedResetTimeoutRef.current);
+      }
+      savedResetTimeoutRef.current = window.setTimeout(() => {
+        setSaved(false);
+        savedResetTimeoutRef.current = null;
+      }, 2000);
     } catch (e: unknown) {
-      console.error("Failed to save config:", e);
       const detail = axios.isAxiosError(e)
         ? (() => {
             const data = e.response?.data as { detail?: unknown } | undefined;
@@ -146,23 +183,30 @@ export function Settings() {
             return undefined;
           })()
         : undefined;
-      alert("保存失败: " + (detail || (e instanceof Error ? e.message : "未知错误")));
+      setPageError(`保存失败: ${detail || (e instanceof Error ? e.message : "未知错误")}`);
     } finally {
       setSaving(false);
     }
   };
 
   const handleReset = async () => {
-    if (!confirm("确定要重置当前项目的配置吗？此操作将删除已保存的 API 密钥、模型和流水线设置。")) return;
     setResetting(true);
+    setPageError(null);
     try {
       await api.resetConfig();
-      await loadConfig();
+      setRefreshKey((value) => value + 1);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch (e: unknown) {
-      console.error("Failed to reset config:", e);
-      alert("重置失败，请重试");
+      setConfirmReset(false);
+      setPageNotice("当前项目配置已重置。");
+      if (savedResetTimeoutRef.current !== null) {
+        window.clearTimeout(savedResetTimeoutRef.current);
+      }
+      savedResetTimeoutRef.current = window.setTimeout(() => {
+        setSaved(false);
+        savedResetTimeoutRef.current = null;
+      }, 2000);
+    } catch {
+      setPageError("重置失败，请重试。");
     } finally {
       setResetting(false);
     }
@@ -178,12 +222,69 @@ export function Settings() {
 
   const chainReadiness = getCoreChainReadiness({
     hasProjectSummary: Boolean(currentBook?.summary.trim()),
-    hasOutline: Boolean(hasOutline),
-    hasRealModel: hasSavedModel,
+    hasOutline: statusSnapshot?.core_chain_readiness?.outline_ready ?? null,
+    hasRealModel: statusSnapshot?.core_chain_readiness?.real_model_ready ?? null,
+    facts: statusSnapshot?.core_chain_readiness,
   });
 
   return (
     <div className="h-full overflow-auto p-6">
+      {pageError && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <div className="flex items-start justify-between gap-3">
+            <span>{pageError}</span>
+            <button className="text-xs font-medium text-red-700" onClick={() => setPageError(null)}>
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
+      {pageNotice && (
+        <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+          <div className="flex items-start justify-between gap-3">
+            <span>{pageNotice}</span>
+            <button className="text-xs font-medium text-green-700" onClick={() => setPageNotice(null)}>
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
+      {restoreTarget !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900">回滚版本</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              确定回滚到版本 {restoreTarget} 吗？当前状态将被覆盖。
+            </p>
+            <div className="mt-6 flex gap-2">
+              <Button className="flex-1" variant="outline" onClick={() => setRestoreTarget(null)}>
+                取消
+              </Button>
+              <Button className="flex-1" variant="destructive" onClick={() => void handleRestoreSnapshot(restoreTarget)}>
+                确认回滚
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmReset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900">重置配置</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              确定重置当前项目配置吗？已保存的 API 密钥、模型和流水线设置都会被删除。
+            </p>
+            <div className="mt-6 flex gap-2">
+              <Button className="flex-1" variant="outline" onClick={() => setConfirmReset(false)}>
+                取消
+              </Button>
+              <Button className="flex-1" variant="destructive" onClick={() => void handleReset()}>
+                确认重置
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Toolbar */}
       <div className="flex justify-between items-center mb-6">
         <div>
@@ -201,7 +302,7 @@ export function Settings() {
           {saved && (
             <span className="text-sm text-green-500">已保存</span>
           )}
-          <Button onClick={handleSave} disabled={saving}>
+          <Button onClick={handleSave} disabled={saving || !configLoaded}>
             {saving ? "保存中..." : "保存设置"}
           </Button>
         </div>
@@ -324,7 +425,10 @@ export function Settings() {
               <input
                 type="number"
                 value={config.max_retries}
-                onChange={(e) => update("max_retries", Number(e.target.value))}
+                onChange={(e) => {
+                  const nextValue = Number.parseInt(e.target.value, 10);
+                  update("max_retries", Number.isFinite(nextValue) ? nextValue : 1);
+                }}
                 min={1}
                 max={10}
                 className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -356,7 +460,7 @@ export function Settings() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => handleRestoreSnapshot(s.version)}
+                    onClick={() => setRestoreTarget(s.version)}
                     disabled={restoring === s.version}
                   >
                     {restoring === s.version ? "回滚中..." : "回滚"}
@@ -380,7 +484,7 @@ export function Settings() {
                 variant="outline"
                 size="sm"
                 className="text-red-600 border-red-200"
-                onClick={handleReset}
+                onClick={() => setConfirmReset(true)}
                 disabled={resetting}
               >
                 {resetting ? "重置中..." : "重置配置"}

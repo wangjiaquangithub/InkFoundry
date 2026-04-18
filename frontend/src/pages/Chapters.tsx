@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
-import { api } from "../api/client";
+import { useNavigate } from "react-router-dom";
+import { api, type ApiStatusResponse } from "../api/client";
 import { Button } from "../components/ui/button";
 import { useAppContext } from "../app-context";
 import { getCoreChainReadiness } from "../lib/core-chain-readiness";
@@ -22,6 +23,7 @@ const getErrorMessage = (error: unknown) => {
 };
 
 export function Chapters() {
+  const navigate = useNavigate();
   const { currentBook } = useAppContext();
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,48 +32,123 @@ export function Chapters() {
   const [editContent, setEditContent] = useState("");
   const [generating, setGenerating] = useState(false);
   const [outline, setOutline] = useState<Outline | null>(null);
-  const [statusMode, setStatusMode] = useState<"model" | "fallback" | null>(null);
+  const [statusSnapshot, setStatusSnapshot] = useState<ApiStatusResponse | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [pageNotice, setPageNotice] = useState<string | null>(null);
   const [loadingReadiness, setLoadingReadiness] = useState(true);
+  const [deleteTarget, setDeleteTarget] = useState<Chapter | null>(null);
+  const [exportFormat, setExportFormat] = useState<"txt" | "md" | "html">("txt");
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [hasOutline, setHasOutline] = useState<boolean | null>(null);
 
-  useEffect(() => {
-    void loadChapters();
-    void loadReadiness();
-  }, [currentBook?.id]);
-
-  const loadChapters = async () => {
-    setLoading(true);
-    try {
-      const res = await api.getChapters();
-      setChapters(res.data.chapters || []);
-    } catch {
-      setChapters([]);
-    } finally {
-      setLoading(false);
-    }
+  const resetSelectedChapter = () => {
+    setSelected(null);
+    setEditing(false);
+    setEditContent("");
+    setDeleteTarget(null);
   };
 
-  const loadReadiness = async () => {
+  useEffect(() => {
+    if (!selected) {
+      return;
+    }
+    if (chapters.some((chapter) => chapter.chapter_num === selected.chapter_num)) {
+      return;
+    }
+    resetSelectedChapter();
+  }, [chapters, selected]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPageState = async () => {
+      setLoading(true);
+      setLoadingReadiness(true);
+      const [chaptersRes, outlineRes, configRes] = await Promise.allSettled([
+        api.getChapters(),
+        api.getOutline(),
+        api.status(),
+      ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (chaptersRes.status === "fulfilled") {
+        setChapters(chaptersRes.value.data.chapters || []);
+      } else {
+        setChapters([]);
+        resetSelectedChapter();
+      }
+
+      if (outlineRes.status === "fulfilled") {
+        setOutline(outlineRes.value.data.outline);
+        setHasOutline(Boolean(outlineRes.value.data.outline));
+      } else {
+        setOutline(null);
+        setHasOutline(null);
+      }
+
+      if (configRes.status === "fulfilled") {
+        setStatusSnapshot(configRes.value.data);
+        setStatusError(null);
+      } else {
+        setStatusSnapshot(null);
+        setStatusError(getErrorMessage(configRes.reason));
+      }
+
+      setLoading(false);
+      setLoadingReadiness(false);
+    };
+
+    void loadPageState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentBook?.id]);
+
+  const refreshGeneratedState = async () => {
+    setLoading(true);
     setLoadingReadiness(true);
-    const [outlineRes, configRes] = await Promise.allSettled([api.getOutline(), api.getConfig()]);
+    const [chaptersRes, outlineRes, configRes] = await Promise.allSettled([
+      api.getChapters(),
+      api.getOutline(),
+      api.status(),
+    ]);
+    let refreshError: string | null = null;
+
+    if (chaptersRes.status === "fulfilled") {
+      setChapters(chaptersRes.value.data.chapters || []);
+    } else {
+      setChapters([]);
+      resetSelectedChapter();
+      refreshError = "章节列表刷新失败，请手动刷新后确认最新状态。";
+    }
 
     if (outlineRes.status === "fulfilled") {
       setOutline(outlineRes.value.data.outline);
+      setHasOutline(Boolean(outlineRes.value.data.outline));
     } else {
       setOutline(null);
+      setHasOutline(null);
     }
 
     if (configRes.status === "fulfilled") {
-      const hasModel = Boolean(configRes.value.data.llm_api_key_masked || configRes.value.data.llm_api_key);
-      setStatusMode(hasModel ? "model" : "fallback");
+      setStatusSnapshot(configRes.value.data);
       setStatusError(null);
     } else {
-      setStatusMode(null);
+      setStatusSnapshot(null);
       setStatusError(getErrorMessage(configRes.reason));
     }
 
+    setLoading(false);
     setLoadingReadiness(false);
+
+    if (refreshError) {
+      throw new Error(refreshError);
+    }
   };
 
   const handleSelect = async (num: number) => {
@@ -80,8 +157,9 @@ export function Chapters() {
       setSelected(res.data);
       setEditContent(res.data.content || "");
       setEditing(false);
-    } catch {
-      setSelected(null);
+    } catch (e: unknown) {
+      resetSelectedChapter();
+      setPageError(`加载第${num}章失败：${getErrorMessage(e)}`);
     }
   };
 
@@ -92,20 +170,37 @@ export function Chapters() {
         content: editContent,
       });
       setEditing(false);
-      loadChapters();
+      setSelected({
+        ...selected,
+        content: editContent,
+      });
+      setChapters((items) =>
+        items.map((chapter) =>
+          chapter.chapter_num === selected.chapter_num
+            ? {
+                ...chapter,
+                content: editContent,
+              }
+            : chapter
+        )
+      );
+      setPageNotice(`第${selected.chapter_num}章已保存。`);
     } catch (e: unknown) {
-      console.error("Failed to save chapter:", e);
+      setPageError(getErrorMessage(e));
     }
   };
 
-  const handleDelete = async (num: number) => {
-    if (!confirm(`确定删除第${num}章？`)) return;
+  const handleDelete = async (chapter: Chapter) => {
     try {
-      await api.deleteChapter(num);
-      loadChapters();
-      if (selected?.chapter_num === num) setSelected(null);
+      await api.deleteChapter(chapter.chapter_num);
+      setChapters((items) => items.filter((item) => item.chapter_num !== chapter.chapter_num));
+      if (selected?.chapter_num === chapter.chapter_num) {
+        setSelected(null);
+      }
+      setDeleteTarget(null);
+      setPageNotice(`第${chapter.chapter_num}章已删除。`);
     } catch (e: unknown) {
-      console.error("Failed to delete chapter:", e);
+      setPageError(getErrorMessage(e));
     }
   };
 
@@ -121,12 +216,12 @@ export function Chapters() {
 
     setGenerating(true);
     setPageError(null);
+    setPageNotice(null);
     try {
       await api.runChapter(nextNum);
-      await loadChapters();
-      await loadReadiness();
+      await refreshGeneratedState();
+      setPageNotice(`第${nextNum}章已生成。`);
     } catch (e: unknown) {
-      console.error("Failed to generate chapter:", e);
       setPageError(getErrorMessage(e));
     } finally {
       setGenerating(false);
@@ -134,10 +229,8 @@ export function Chapters() {
   };
 
   const handleExport = async () => {
-    const format = prompt("选择导出格式 (txt/md/html):", "txt");
-    if (!format || !["txt", "md", "html"].includes(format)) return;
     try {
-      const res = await api.exportNovel(format);
+      const res = await api.exportNovel(exportFormat);
       const { content, filename } = res.data;
       const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -146,8 +239,10 @@ export function Chapters() {
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
+      setShowExportModal(false);
+      setPageNotice(`已导出 ${filename}。`);
     } catch (e: unknown) {
-      alert("导出失败: " + (e instanceof Error ? e.message : "未知错误"));
+      setPageError(`导出失败: ${getErrorMessage(e)}`);
     }
   };
 
@@ -179,8 +274,9 @@ export function Chapters() {
   const outlineSummary = outline?.chapter_summaries?.find((ch) => ch.chapter_num === nextChapterNum)?.summary ?? "";
   const chainReadiness = getCoreChainReadiness({
     hasProjectSummary: Boolean(currentBook?.summary.trim()),
-    hasOutline: Boolean(outline),
-    hasRealModel: statusMode === null ? null : statusMode === "model",
+    hasOutline: outline ? true : hasOutline,
+    hasRealModel: statusSnapshot?.core_chain_readiness?.real_model_ready ?? null,
+    facts: statusSnapshot?.core_chain_readiness,
   });
   const canGenerate = chainReadiness.canGenerateChapter && !generating;
 
@@ -188,7 +284,69 @@ export function Chapters() {
     <div className="flex h-full">
       {pageError && (
         <div className="absolute left-1/2 top-4 z-10 w-[min(720px,calc(100%-2rem))] -translate-x-1/2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {pageError}
+          <div className="flex items-start justify-between gap-3">
+            <span>{pageError}</span>
+            <button className="text-xs font-medium text-red-700" onClick={() => setPageError(null)}>
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
+      {pageNotice && (
+        <div className="absolute left-1/2 top-20 z-10 w-[min(720px,calc(100%-2rem))] -translate-x-1/2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+          <div className="flex items-start justify-between gap-3">
+            <span>{pageNotice}</span>
+            <button className="text-xs font-medium text-green-700" onClick={() => setPageNotice(null)}>
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
+      {deleteTarget && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900">删除章节</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              确定删除第{deleteTarget.chapter_num}章吗？已生成内容将无法恢复。
+            </p>
+            <div className="mt-6 flex gap-2">
+              <Button className="flex-1" variant="outline" onClick={() => setDeleteTarget(null)}>
+                取消
+              </Button>
+              <Button className="flex-1" variant="destructive" onClick={() => void handleDelete(deleteTarget)}>
+                确认删除
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showExportModal && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900">导出小说</h3>
+            <p className="mt-2 text-sm text-gray-600">选择导出格式后立即下载当前项目内容。</p>
+            <div className="mt-4 space-y-2">
+              {(["txt", "md", "html"] as const).map((format) => (
+                <label key={format} className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm text-gray-700">
+                  <input
+                    type="radio"
+                    name="export-format"
+                    checked={exportFormat === format}
+                    onChange={() => setExportFormat(format)}
+                  />
+                  <span>{format.toUpperCase()}</span>
+                </label>
+              ))}
+            </div>
+            <div className="mt-6 flex gap-2">
+              <Button className="flex-1" variant="outline" onClick={() => setShowExportModal(false)}>
+                取消
+              </Button>
+              <Button className="flex-1" onClick={() => void handleExport()}>
+                开始导出
+              </Button>
+            </div>
+          </div>
         </div>
       )}
       {/* Chapter List */}
@@ -244,7 +402,16 @@ export function Chapters() {
               <span className={`rounded-full px-2.5 py-1 ${chainReadiness.badgeClassName}`}>
                 链路状态：{chainReadiness.label}
               </span>
-              <span>模式：{loadingReadiness ? "检查中" : statusMode === "model" ? "真实模型" : statusMode === "fallback" ? "未配置模型" : "状态待确认"}</span>
+              <span>
+                模式：
+                {loadingReadiness
+                  ? "检查中"
+                  : statusSnapshot?.core_chain_readiness?.real_model_ready === true
+                    ? "真实模型"
+                    : statusSnapshot?.core_chain_readiness?.real_model_ready === false
+                      ? "未配置模型"
+                      : "状态待确认"}
+              </span>
               <span>大纲：{outline ? `已加载（目标 ${outline.total_chapters} 章）` : "缺失"}</span>
               <span>下一步：{chainReadiness.nextAction}</span>
               {outlineSummary ? <span>下一章概要：{outlineSummary}</span> : null}
@@ -255,7 +422,7 @@ export function Chapters() {
             <Button
               variant="outline"
               size="sm"
-              onClick={handleExport}
+              onClick={() => setShowExportModal(true)}
               disabled={chapters.length === 0}
             >
               导出
@@ -289,7 +456,7 @@ export function Chapters() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => handleDelete(selected.chapter_num)}
+                    onClick={() => setDeleteTarget(selected)}
                   >
                     删除
                   </Button>
@@ -325,13 +492,26 @@ export function Chapters() {
                 </div>
                 <p className="text-sm text-gray-400 mb-2">{chainReadiness.description}</p>
                 <p className="text-sm text-gray-400 mb-4">
-                  {outlineSummary && chainReadiness.canGenerateChapter
-                    ? `下一章将基于概要：${outlineSummary}`
-                    : `下一步：${chainReadiness.nextAction}`}
+                  {hasOutline === null
+                    ? "当前无法确认大纲状态，请稍后重试或重新检查设置。"
+                    : outlineSummary && chainReadiness.canGenerateChapter
+                      ? `下一章将基于概要：${outlineSummary}`
+                      : `下一步：${chainReadiness.nextAction}`}
                 </p>
-                <Button size="lg" onClick={handleGenerate} disabled={!canGenerate}>
-                  {generating ? "生成中..." : "生成第一章"}
-                </Button>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Button size="lg" onClick={handleGenerate} disabled={!canGenerate}>
+                    {generating ? "生成中..." : "生成第一章"}
+                  </Button>
+                  {!chainReadiness.canGenerateChapter && chainReadiness.primaryAction.route ? (
+                    <Button
+                      size="lg"
+                      variant="outline"
+                      onClick={() => navigate(chainReadiness.primaryAction.route!)}
+                    >
+                      {chainReadiness.primaryAction.label}
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </div>
           )}

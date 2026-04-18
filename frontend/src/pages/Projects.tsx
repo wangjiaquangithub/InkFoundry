@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { normalizeBookInfo, useAppContext } from "../app-context";
 import { api, type ProjectRecord } from "../api/client";
 import { Button } from "../components/ui/button";
+import { getCoreChainReadiness } from "../lib/core-chain-readiness";
 
 type Project = ProjectRecord;
 
@@ -18,7 +19,7 @@ const GENRE_MAP: Record<string, string> = {
 
 export function Projects() {
   const navigate = useNavigate();
-  const { currentBook, setCurrentBook, isRestoringBook } = useAppContext();
+  const { currentBook, setCurrentBook, isRestoringBook, restoreIssue, clearRestoreIssue } = useAppContext();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -28,25 +29,59 @@ export function Projects() {
   const [newTargetChapters, setNewTargetChapters] = useState("12");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [pageNotice, setPageNotice] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
+    isMountedRef.current = true;
     void loadProjects();
+
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
 
   const loadProjects = async () => {
-    setLoading(true);
+    if (isMountedRef.current) {
+      setLoading(true);
+    }
+
     try {
       const projRes = await api.listProjects();
       const list = projRes.data.projects || [];
 
-      // Each project's chapter count is stored in its own state.db
-      // The listProjects endpoint already returns total_chapters if available
+      if (!isMountedRef.current) {
+        return;
+      }
       setProjects(list);
     } catch {
-      console.error("Failed to load projects");
+      if (!isMountedRef.current) {
+        return;
+      }
+      setProjects([]);
+      setPageNotice("项目列表加载失败，请稍后重试。");
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
+  };
+
+  const getProjectReadiness = (project: Project) =>
+    getCoreChainReadiness({
+      hasProjectSummary: Boolean(project.summary?.trim()),
+      hasOutline: project.core_chain_readiness?.outline_ready ?? null,
+      hasRealModel: project.core_chain_readiness?.real_model_ready ?? null,
+      facts: project.core_chain_readiness,
+    });
+
+  const getProjectEntryAction = (project: Project) => {
+    const readiness = getProjectReadiness(project);
+    return {
+      label: readiness.primaryAction.label,
+      route: readiness.primaryAction.route || "/",
+    };
   };
 
   const activateProject = async (project: Project) => {
@@ -76,15 +111,15 @@ export function Projects() {
         target_chapters: targetChapters,
       });
       const project = createRes.data.project;
+      const entryAction = getProjectEntryAction(project);
       await activateProject(project);
       setShowCreate(false);
       setNewTitle("");
       setNewGenre("xuanhuan");
       setNewSummary("");
       setNewTargetChapters("12");
-      navigate("/outline");
+      navigate(entryAction.route);
     } catch (e: unknown) {
-      console.error("Failed to create project:", e);
       setCreateError(e instanceof Error ? e.message : "创建失败，请重试");
     } finally {
       setCreating(false);
@@ -97,26 +132,26 @@ export function Projects() {
       if (!project) {
         throw new Error("Project not found");
       }
+      const entryAction = getProjectEntryAction(project);
       await activateProject(project);
-      navigate("/outline");
-    } catch (e: unknown) {
-      console.error("Failed to activate project:", e);
-      alert("切换项目失败");
+      navigate(entryAction.route);
+    } catch {
+      setPageNotice("切换项目失败，请重试。");
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("确定要删除此项目吗？数据将无法恢复。")) return;
+  const handleDelete = async (project: Project) => {
     try {
-      await api.deleteProject(id);
-      if (currentBook?.id === id) {
+      await api.deleteProject(project.id);
+      if (currentBook?.id === project.id) {
         setCurrentBook(null);
         navigate("/");
       }
+      setDeleteTarget(null);
+      setPageNotice(`项目「${project.title}」已删除。`);
       await loadProjects();
-    } catch (e: unknown) {
-      console.error("Failed to delete project:", e);
-      alert("删除失败，请重试");
+    } catch {
+      setPageNotice("删除失败，请重试。");
     }
   };
 
@@ -126,6 +161,26 @@ export function Projects() {
 
   return (
     <div className="h-full overflow-auto p-6">
+      {restoreIssue && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <div className="flex items-start justify-between gap-3">
+            <span>{restoreIssue}</span>
+            <button className="text-xs font-medium text-amber-700" onClick={clearRestoreIssue}>
+              知道了
+            </button>
+          </div>
+        </div>
+      )}
+      {pageNotice && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+          <div className="flex items-start justify-between gap-3">
+            <span>{pageNotice}</span>
+            <button className="text-xs font-medium text-blue-700" onClick={() => setPageNotice(null)}>
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
       {/* Page header */}
       <div className="flex items-center justify-between mb-8">
         <div>
@@ -144,43 +199,73 @@ export function Projects() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {projects.map((p) => (
-            <div
-              key={p.id}
-              className="bg-white rounded-xl border p-5 hover:shadow-md transition"
-            >
-              <h3 className="font-semibold text-lg mb-1">{p.title}</h3>
-              <p className="text-xs text-gray-400 mb-2">
-                {GENRE_MAP[p.genre] || p.genre}
-                {p.target_chapters ? ` · 目标 ${p.target_chapters}章` : ""}
-                {p.total_chapters ? ` · 已写 ${p.total_chapters}章` : ""}
-                {p.latest_chapter ? ` · 最新: 第${p.latest_chapter}章` : ""}
-              </p>
-              {p.summary ? (
-                <p className="text-sm text-gray-600 mb-3 line-clamp-3">{p.summary}</p>
-              ) : (
-                <p className="text-sm text-amber-600 mb-3">未填写故事简介，核心创作链路会退化。</p>
-              )}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  className="flex-1"
-                  onClick={() => handleActivate(p.id)}
-                  disabled={isRestoringBook}
-                >
-                  {isRestoringBook ? "恢复中..." : "进入创作"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-red-600"
-                  onClick={() => handleDelete(p.id)}
-                >
-                  删除
-                </Button>
+          {projects.map((p) => {
+            const readiness = getProjectReadiness(p);
+            const entryAction = getProjectEntryAction(p);
+
+            return (
+              <div
+                key={p.id}
+                className="bg-white rounded-xl border p-5 hover:shadow-md transition"
+              >
+                <h3 className="font-semibold text-lg mb-1">{p.title}</h3>
+                <p className="text-xs text-gray-400 mb-2">
+                  {GENRE_MAP[p.genre] || p.genre}
+                  {p.target_chapters ? ` · 目标 ${p.target_chapters}章` : ""}
+                  {p.total_chapters ? ` · 已写 ${p.total_chapters}章` : ""}
+                  {p.latest_chapter ? ` · 最新: 第${p.latest_chapter}章` : ""}
+                </p>
+                <div className="mb-3 flex items-center gap-2 text-xs">
+                  <span className={`rounded-full px-2.5 py-1 ${readiness.badgeClassName}`}>
+                    {readiness.label}
+                  </span>
+                  <span className="text-gray-500">下一步：{readiness.nextAction}</span>
+                </div>
+                {p.summary ? (
+                  <p className="text-sm text-gray-600 mb-3 line-clamp-3">{p.summary}</p>
+                ) : (
+                  <p className="text-sm text-amber-600 mb-3">未填写故事简介，核心创作链路会退化。</p>
+                )}
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    className="flex-1"
+                    onClick={() => handleActivate(p.id)}
+                    disabled={isRestoringBook}
+                  >
+                    {isRestoringBook ? "恢复中..." : entryAction.label}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-red-600"
+                    onClick={() => setDeleteTarget(p)}
+                  >
+                    删除
+                  </Button>
+                </div>
               </div>
+            );
+          })}
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900">删除项目</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              确定删除项目「{deleteTarget.title}」吗？该项目的大纲、章节和配置都会一起删除，无法恢复。
+            </p>
+            <div className="mt-6 flex gap-2">
+              <Button className="flex-1" variant="outline" onClick={() => setDeleteTarget(null)}>
+                取消
+              </Button>
+              <Button className="flex-1" variant="destructive" onClick={() => void handleDelete(deleteTarget)}>
+                确认删除
+              </Button>
             </div>
-          ))}
+          </div>
         </div>
       )}
 

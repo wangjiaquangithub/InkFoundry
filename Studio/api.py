@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -55,6 +56,13 @@ class StateSnapshotResponse(BaseModel):
     world_states: List[Dict[str, Any]]
 
 
+class CoreChainReadiness(BaseModel):
+    project_brief_ready: bool = False
+    outline_ready: bool = False
+    real_model_ready: bool = False
+    chapter_ready: bool = False
+
+
 class ProjectStatus(BaseModel):
     id: str = "novel-001"
     title: str = "Untitled Novel"
@@ -62,6 +70,7 @@ class ProjectStatus(BaseModel):
     current_chapter: int = 1
     total_chapters: int = 10
     status: str = "idle"
+    core_chain_readiness: CoreChainReadiness = CoreChainReadiness()
 
 
 class ChapterCreate(BaseModel):
@@ -216,8 +225,14 @@ class PipelineManager:
         self._runtimes: Dict[str, PipelineRuntime] = {}
         self._registry_lock = threading.Lock()
 
+    def _memory_scope(self, db: StateDB) -> tuple[str, Optional[str]]:
+        project_key = getattr(db, "db_path", "") or "__default__"
+        if project_key == ":memory:":
+            return f":memory:{id(db)}", None
+        return project_key, f"{project_key}.memory"
+
     def _project_key(self, db: StateDB) -> str:
-        return getattr(db, "db_path", "") or "__default__"
+        return self._memory_scope(db)[0]
 
     def _runtime_for_db(self, db: StateDB) -> PipelineRuntime:
         project_key = self._project_key(db)
@@ -268,8 +283,12 @@ class PipelineManager:
         except Exception:
             pass
 
-        # Create MemoryBank (uses ChromaDB if available, else in-memory)
-        memory_bank = MemoryBank(collection_name="novel_memory")
+        memory_scope, persist_directory = self._memory_scope(db)
+        project_hash = hashlib.md5(memory_scope.encode("utf-8")).hexdigest()[:12]
+        memory_bank = MemoryBank(
+            collection_name=f"novel_memory_{project_hash}",
+            persist_directory=persist_directory,
+        )
 
         return PipelineOrchestrator(
             state_db=db,
@@ -642,6 +661,43 @@ def _get_project_brief(db: StateDB) -> Dict[str, Any]:
     return brief
 
 
+def _compute_core_chain_readiness(db: StateDB) -> Dict[str, bool]:
+    brief = _get_project_brief(db)
+    has_project_summary = bool(str(brief.get("summary") or "").strip())
+    has_outline = db.get_outline() is not None
+
+    try:
+        engine_config = _get_engine_config_or_http(db)
+    except HTTPException as exc:
+        if exc.status_code == 422:
+            has_real_model = False
+        else:
+            raise
+    else:
+        has_real_model = engine_config is not None and bool(engine_config.llm.api_key)
+
+    return {
+        "project_brief_ready": has_project_summary,
+        "outline_ready": has_outline,
+        "real_model_ready": has_real_model,
+        "chapter_ready": has_project_summary and has_outline and has_real_model,
+    }
+
+
+
+def _safe_core_chain_readiness(db: StateDB) -> Dict[str, bool]:
+    try:
+        return _compute_core_chain_readiness(db)
+    except Exception:
+        return {
+            "project_brief_ready": False,
+            "outline_ready": False,
+            "real_model_ready": False,
+            "chapter_ready": False,
+        }
+
+
+
 def _fallback_project_status() -> Dict[str, Any]:
     return {
         "id": "novel-001",
@@ -650,6 +706,12 @@ def _fallback_project_status() -> Dict[str, Any]:
         "current_chapter": 1,
         "total_chapters": 10,
         "status": "error",
+        "core_chain_readiness": {
+            "project_brief_ready": False,
+            "outline_ready": False,
+            "real_model_ready": False,
+            "chapter_ready": False,
+        },
     }
 
 
@@ -683,6 +745,7 @@ def _derive_project_status(completed: int, total_chapters: int, pipeline_status:
 def _build_project_status(db: StateDB, pipeline_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     brief = _get_project_brief(db)
     config = _load_stored_config(db)
+    readiness = _safe_core_chain_readiness(db)
     title = brief.get("title") or config.get("novel_title") or "Untitled Novel"
     genre = brief.get("genre") or config.get("genre") or "fiction"
 
@@ -717,6 +780,7 @@ def _build_project_status(db: StateDB, pipeline_status: Optional[Dict[str, Any]]
         "current_chapter": _derive_current_chapter(chapters, total_chapters),
         "total_chapters": total_chapters,
         "status": _derive_project_status(completed, total_chapters, resolved_pipeline_status),
+        "core_chain_readiness": readiness,
     }
 
 
@@ -740,6 +804,12 @@ def _build_project_payload(info: ProjectInfo) -> Dict[str, Any]:
         "created_at": info.created_at,
         "last_modified": info.last_modified,
         "status": info.status,
+        "core_chain_readiness": {
+            "project_brief_ready": False,
+            "outline_ready": False,
+            "real_model_ready": False,
+            "chapter_ready": False,
+        },
     }
     try:
         project_db = StateDB(info.db_path)
@@ -762,6 +832,7 @@ def _build_project_payload(info: ProjectInfo) -> Dict[str, Any]:
         project["outline_total_chapters"] = outline.total_chapters if outline else 0
         project["total_chapters"] = len(chapters)
         project["latest_chapter"] = max((c.chapter_num for c in chapters), default=0)
+        project["core_chain_readiness"] = _safe_core_chain_readiness(project_db)
     finally:
         project_db.close()
 

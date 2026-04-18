@@ -1132,6 +1132,92 @@ def test_api_status_survives_malformed_stored_config(client):
     assert data["title"] == "Untitled Novel"
 
 
+def test_api_status_includes_core_chain_readiness_fact(client, monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["core_chain_readiness"] == {
+        "project_brief_ready": False,
+        "outline_ready": False,
+        "real_model_ready": False,
+        "chapter_ready": False,
+    }
+
+
+def test_active_project_payload_reuses_same_core_chain_readiness_as_status(client):
+    project = client.post("/api/projects", json={
+        "title": "Ready Project",
+        "genre": "fantasy",
+        "summary": "Ready summary",
+        "target_chapters": 4,
+    }).json()["project"]
+
+    assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+    assert client.post("/api/outlines/generate", json={}).status_code == 200
+    assert client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.openai.com/v1",
+        "default_model": "qwen3.6-plus",
+    }).status_code == 200
+
+    status_response = client.get("/api/status")
+    active_project_response = client.get("/api/projects/active")
+
+    assert status_response.status_code == 200
+    assert active_project_response.status_code == 200
+    readiness = status_response.json()["core_chain_readiness"]
+    assert readiness == {
+        "project_brief_ready": True,
+        "outline_ready": True,
+        "real_model_ready": True,
+        "chapter_ready": True,
+    }
+    assert active_project_response.json()["project"]["core_chain_readiness"] == readiness
+
+
+def test_project_payload_falls_back_to_false_readiness_when_project_config_is_malformed(client):
+    created_project = client.post("/api/projects", json={
+        "title": "Broken Config Project",
+        "genre": "fantasy",
+        "summary": "Ready summary",
+        "target_chapters": 4,
+    }).json()["project"]
+
+    assert client.post(f"/api/projects/{created_project['id']}/activate").status_code == 200
+    project_info = client.app.state.project_manager.get_project(created_project["id"])
+    assert project_info is not None
+    project_db = StateDB(project_info.db_path)
+    try:
+        project_db.conn.execute(
+            "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
+            ("config", '{"llm_api_key": "broken"'),
+        )
+        project_db.conn.commit()
+    finally:
+        project_db.close()
+
+    active_project_response = client.get("/api/projects/active")
+    projects_response = client.get("/api/projects")
+
+    assert active_project_response.status_code == 200
+    assert projects_response.status_code == 200
+    assert active_project_response.json()["project"]["core_chain_readiness"] == {
+        "project_brief_ready": False,
+        "outline_ready": False,
+        "real_model_ready": False,
+        "chapter_ready": False,
+    }
+    listed_project = next(item for item in projects_response.json()["projects"] if item["id"] == created_project["id"])
+    assert listed_project["core_chain_readiness"] == {
+        "project_brief_ready": False,
+        "outline_ready": False,
+        "real_model_ready": False,
+        "chapter_ready": False,
+    }
+
+
 def test_status_and_api_status_share_same_fallback_for_malformed_project_brief(client):
     client.app.state.db.conn.execute(
         "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",

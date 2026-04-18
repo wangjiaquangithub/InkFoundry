@@ -1,6 +1,13 @@
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { AppContext, normalizeBookInfo, saveCurrentBook, useAppContext, type BookInfo } from "./app-context";
+import {
+  AppContext,
+  loadStoredCurrentBook,
+  normalizeBookInfo,
+  saveCurrentBook,
+  useAppContext,
+  type BookInfo,
+} from "./app-context";
 import { api } from "./api/client";
 import { Projects } from "./pages/Projects";
 import { Outline } from "./pages/Outline";
@@ -126,27 +133,38 @@ function BookGuard({ children }: { children: ReactNode }) {
 }
 
 function App() {
-  const [currentBook, setCurrentBookState] = useState<BookInfo | null>(null);
+  const [currentBook, setCurrentBookState] = useState<BookInfo | null>(() => loadStoredCurrentBook());
   const [isRestoringBook, setIsRestoringBook] = useState(true);
+  const [restoreIssue, setRestoreIssue] = useState<string | null>(null);
 
   const setCurrentBook = useCallback((book: BookInfo | null) => {
     setCurrentBookState(book);
     saveCurrentBook(book);
+    if (book) {
+      setRestoreIssue(null);
+    }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
 
     const restoreProjectContext = async () => {
+      const storedBook = loadStoredCurrentBook();
       try {
         const res = await api.getActiveProject();
         const project = res.data.project ? normalizeBookInfo(res.data.project) : null;
         if (!cancelled) {
           setCurrentBook(project);
+          if (!project && storedBook) {
+            setRestoreIssue("上次选中的项目已失效或被删除，请重新选择一个项目。");
+          }
         }
       } catch {
         if (!cancelled) {
           setCurrentBook(null);
+          if (storedBook) {
+            setRestoreIssue("项目上下文恢复失败，请重新确认项目后继续。");
+          }
         }
       } finally {
         if (!cancelled) {
@@ -163,7 +181,15 @@ function App() {
   }, [setCurrentBook]);
 
   return (
-    <AppContext.Provider value={{ currentBook, setCurrentBook, isRestoringBook }}>
+    <AppContext.Provider
+      value={{
+        currentBook,
+        setCurrentBook,
+        isRestoringBook,
+        restoreIssue,
+        clearRestoreIssue: () => setRestoreIssue(null),
+      }}
+    >
       <BrowserRouter>
         <Routes>
           <Route

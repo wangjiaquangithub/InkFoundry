@@ -29,6 +29,13 @@ export interface Chapter {
   created_at?: string;
 }
 
+export interface CoreChainReadinessFacts {
+  project_brief_ready: boolean;
+  outline_ready: boolean;
+  real_model_ready: boolean;
+  chapter_ready: boolean;
+}
+
 export interface NovelProject {
   id: string;
   title: string;
@@ -36,6 +43,7 @@ export interface NovelProject {
   current_chapter: number;
   total_chapters: number;
   status: "idle" | "running" | "paused" | "completed" | "error";
+  core_chain_readiness?: CoreChainReadinessFacts;
 }
 
 export interface PipelineStatus {

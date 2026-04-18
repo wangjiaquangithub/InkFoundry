@@ -21,12 +21,16 @@ interface AppContextType {
   currentBook: BookInfo | null;
   setCurrentBook: (book: BookInfo | null) => void;
   isRestoringBook: boolean;
+  restoreIssue: string | null;
+  clearRestoreIssue: () => void;
 }
 
 export const AppContext = createContext<AppContextType>({
   currentBook: null,
   setCurrentBook: () => {},
   isRestoringBook: false,
+  restoreIssue: null,
+  clearRestoreIssue: () => {},
 });
 
 export function useAppContext() {
