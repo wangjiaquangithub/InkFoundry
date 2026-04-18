@@ -45,7 +45,13 @@ class ProjectManager:
             """)
             conn.commit()
 
-    def create_project(self, title: str, genre: str = "unknown") -> ProjectInfo:
+    def create_project(
+        self,
+        title: str,
+        genre: str = "unknown",
+        summary: str = "",
+        target_chapters: int = 100,
+    ) -> ProjectInfo:
         """Create a new project with its own StateDB."""
         project_id = str(uuid.uuid4())[:8]
         now = datetime.now().isoformat()
@@ -67,12 +73,23 @@ class ProjectManager:
             )
             conn.commit()
 
-        # Initialize StateDB tables for the project
+        # Initialize StateDB tables for the project and persist the brief.
         from Engine.core.state_db import StateDB
         db = StateDB(db_path)
-        # Initialize the database (creates tables)
         db.get_character("placeholder")
         db.delete_character("placeholder")
+        db.update_state(
+            "project_brief",
+            {
+                "title": title,
+                "genre": genre,
+                "summary": summary,
+                "target_chapters": target_chapters,
+            },
+        )
+        existing_config = db.get_state("config") or {}
+        existing_config.update({"novel_title": title, "genre": genre})
+        db.update_state("config", existing_config)
         db.close()
 
         return info

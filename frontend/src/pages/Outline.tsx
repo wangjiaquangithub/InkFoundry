@@ -1,11 +1,24 @@
 import { useState, useEffect, useRef } from "react";
+import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAppContext } from "../app-context";
 import { Button } from "../components/ui/button";
+import { getCoreChainReadiness } from "../lib/core-chain-readiness";
 import type { Outline } from "../types";
 
 const DEFAULT_OUTLINE_CHAPTERS = 100;
+
+const getErrorMessage = (error: unknown) => {
+  if (axios.isAxiosError(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === "string") {
+      return detail;
+    }
+    return error.message;
+  }
+  return error instanceof Error ? error.message : "生成大纲失败";
+};
 
 export function Outline() {
   const navigate = useNavigate();
@@ -14,6 +27,8 @@ export function Outline() {
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [generationMode, setGenerationMode] = useState<"model" | "fallback" | null>(null);
+  const [hasRealModel, setHasRealModel] = useState<boolean | null>(null);
   const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -25,19 +40,32 @@ export function Outline() {
 
   const loadOutline = async () => {
     setLoading(true);
-    try {
-      const res = await api.getOutline();
-      setOutline(res.data.outline);
-    } catch {
+    setGenerationMode(null);
+    const [outlineRes, configRes] = await Promise.allSettled([api.getOutline(), api.getConfig()]);
+
+    if (outlineRes.status === "fulfilled") {
+      setOutline(outlineRes.value.data.outline);
+    } else {
       setOutline(null);
-    } finally {
-      setLoading(false);
+      setGenerationMode(null);
     }
+
+    if (configRes.status === "fulfilled") {
+      setHasRealModel(Boolean(configRes.value.data.llm_api_key_masked || configRes.value.data.llm_api_key));
+    } else {
+      setHasRealModel(null);
+    }
+
+    setLoading(false);
   };
 
   const handleGenerate = async () => {
     if (!currentBook) {
       setError("请先进入一个项目");
+      return;
+    }
+    if (!currentBook.summary.trim()) {
+      setError("请先回到项目页填写故事简介，再生成大纲");
       return;
     }
 
@@ -47,13 +75,14 @@ export function Outline() {
       const res = await api.generateOutline({
         genre: currentBook.genre,
         title: currentBook.title,
-        summary: "",
-        total_chapters: DEFAULT_OUTLINE_CHAPTERS,
+        summary: currentBook.summary,
+        total_chapters: currentBook.targetChapters || DEFAULT_OUTLINE_CHAPTERS,
       });
       setOutline(res.data.outline);
+      setGenerationMode(res.data.mode);
       navTimerRef.current = setTimeout(() => navigate("/chapters"), 1500);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "生成大纲失败");
+      setError(getErrorMessage(e));
     } finally {
       setGenerating(false);
     }
@@ -62,6 +91,12 @@ export function Outline() {
   if (loading) {
     return <div className="flex items-center justify-center h-full"><p className="text-gray-400">加载中...</p></div>;
   }
+
+  const chainReadiness = getCoreChainReadiness({
+    hasProjectSummary: Boolean(currentBook?.summary.trim()),
+    hasOutline: Boolean(outline),
+    hasRealModel,
+  });
 
   return (
     <div className="h-full overflow-auto">
@@ -85,8 +120,23 @@ export function Outline() {
               <>
                 <div className="text-5xl mb-4">📝</div>
                 <h2 className="text-xl font-semibold mb-2">还没有大纲</h2>
-                <p className="text-gray-400 mb-6">生成你的小说大纲，AI 会根据题材和简介生成完整的故事结构</p>
-                <Button onClick={handleGenerate} disabled={generating}>
+                <div className="mb-3 flex items-center justify-center">
+                  <span className={`rounded-full px-2.5 py-1 text-xs ${chainReadiness.badgeClassName}`}>
+                    {chainReadiness.label}
+                  </span>
+                </div>
+                <p className="text-gray-400 mb-3">{chainReadiness.description}</p>
+                <div className="mb-3 rounded-lg border bg-gray-50 px-4 py-3 text-left text-sm text-gray-600">
+                  <div><span className="font-medium">项目：</span>{currentBook?.title ?? "-"}</div>
+                  <div><span className="font-medium">目标章数：</span>{currentBook?.targetChapters ?? DEFAULT_OUTLINE_CHAPTERS}</div>
+                  <div><span className="font-medium">简介：</span>{currentBook?.summary?.trim() ? currentBook.summary : "未填写"}</div>
+                </div>
+                <p className="mb-6 text-xs text-gray-500">下一步：{chainReadiness.nextAction}</p>
+                <Button
+                  onClick={handleGenerate}
+                  disabled={generating || !chainReadiness.canGenerateOutline}
+                  title={!chainReadiness.canGenerateOutline ? chainReadiness.nextAction : undefined}
+                >
                   {generating ? "生成中..." : "生成大纲"}
                 </Button>
               </>
@@ -99,9 +149,16 @@ export function Outline() {
           <div className="bg-white rounded-xl border p-6 mb-4">
             <h2 className="text-lg font-semibold mb-3">{outline.title}</h2>
             <p className="text-gray-600 mb-4">{outline.summary || "暂无简介"}</p>
-            <div className="flex gap-4 text-sm text-gray-500">
+            <div className="flex flex-wrap gap-4 text-sm text-gray-500">
               <span>总章数: {outline.total_chapters}</span>
               <span>结构: {outline.arc}</span>
+              <span>生成模式: {generationMode === "model" ? "真实模型" : generationMode === "fallback" ? "模板降级" : "未知"}</span>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-gray-500">
+              <span className={`rounded-full px-2.5 py-1 ${chainReadiness.badgeClassName}`}>
+                链路状态：{chainReadiness.label}
+              </span>
+              <span>下一步：{chainReadiness.nextAction}</span>
             </div>
             {outline.genre_rules.length > 0 && (
               <div className="mt-4">

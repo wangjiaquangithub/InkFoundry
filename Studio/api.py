@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import threading
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, WebSocket
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -30,6 +33,8 @@ from Engine.core.models import (
     CharacterRelationship, WorldBuilding, PowerSystem, Timeline,
     StateSnapshot, WorldState,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CharacterCreate(BaseModel):
@@ -108,10 +113,10 @@ class WorldBuildingCreate(BaseModel):
 
 
 class OutlineGenerate(BaseModel):
-    genre: str = "xuanhuan"
-    title: str = "Untitled"
-    summary: str = ""
-    total_chapters: int = 100
+    genre: Optional[str] = None
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    total_chapters: Optional[int] = None
 
 
 class PipelineStart(BaseModel):
@@ -183,10 +188,21 @@ class TrendAnalyzeRequest(BaseModel):
 class ProjectCreate(BaseModel):
     title: str
     genre: str = "unknown"
+    summary: str = ""
+    target_chapters: int = 100
 
 
 class ReviewRejectRequest(BaseModel):
     note: str = ""
+
+
+@dataclass
+class PipelineRuntime:
+    db: Optional[StateDB] = None
+    orchestrator: Optional[Any] = None
+    task: Optional[asyncio.Task] = None
+    sync_run_lock: threading.Lock = field(default_factory=threading.Lock)
+    sync_running: bool = False
 
 
 class PipelineManager:
@@ -197,13 +213,42 @@ class PipelineManager:
     """
 
     def __init__(self):
-        self._orchestrator: Optional[Any] = None  # PipelineOrchestrator
-        self._task: Optional[asyncio.Task] = None
-        self._db: Optional[StateDB] = None
+        self._runtimes: Dict[str, PipelineRuntime] = {}
+        self._registry_lock = threading.Lock()
+
+    def _project_key(self, db: StateDB) -> str:
+        return getattr(db, "db_path", "") or "__default__"
+
+    def _runtime_for_db(self, db: StateDB) -> PipelineRuntime:
+        project_key = self._project_key(db)
+        with self._registry_lock:
+            runtime = self._runtimes.get(project_key)
+            if runtime is None:
+                runtime = PipelineRuntime(db=db)
+                self._runtimes[project_key] = runtime
+            elif runtime.db is None:
+                runtime.db = db
+            return runtime
+
+    def _is_runtime_running(self, runtime: PipelineRuntime) -> bool:
+        return runtime.sync_running or (runtime.task is not None and not runtime.task.done())
+
+    def _clear_runtime(self, db: StateDB) -> None:
+        project_key = self._project_key(db)
+        with self._registry_lock:
+            runtime = self._runtimes.get(project_key)
+            if runtime is None:
+                return
+            runtime.task = None
+            runtime.orchestrator = None
+            runtime.db = None
+            runtime.sync_running = False
+            self._runtimes.pop(project_key, None)
 
     @property
     def is_running(self) -> bool:
-        return self._task is not None and not self._task.done()
+        with self._registry_lock:
+            return any(self._is_runtime_running(runtime) for runtime in self._runtimes.values())
 
     def _create_orchestrator(self, db: StateDB) -> Any:
         """Create a new PipelineOrchestrator with current config."""
@@ -235,111 +280,185 @@ class PipelineManager:
 
     async def start_chapter(self, chapter_num: int, db: StateDB) -> Dict[str, Any]:
         """Start generating a single chapter in the background."""
-        if self.is_running:
+        runtime = self._runtime_for_db(db)
+        if not runtime.sync_run_lock.acquire(blocking=False):
             return {"error": "Pipeline already running", "started": False}
-        self._db = db
-        self._orchestrator = self._create_orchestrator(db)
 
-        async def _run():
-            try:
-                await self._orchestrator.run_chapter(chapter_num)
-            except Exception:
-                pass  # Events published inside orchestrator
+        try:
+            if self._is_runtime_running(runtime):
+                return {"error": "Pipeline already running", "started": False}
+            runtime.db = db
+            runtime.orchestrator = self._create_orchestrator(db)
 
-        self._task = asyncio.create_task(_run())
-        return {"started": True, "chapter_num": chapter_num}
+            async def _run():
+                try:
+                    await runtime.orchestrator.run_chapter(chapter_num)
+                except Exception:
+                    pass  # Events published inside orchestrator
+                finally:
+                    self._clear_runtime(db)
+
+            runtime.task = asyncio.create_task(_run())
+            return {"started": True, "chapter_num": chapter_num}
+        finally:
+            runtime.sync_run_lock.release()
 
     async def run_chapter_sync(self, chapter_num: int, db: StateDB) -> Dict[str, Any]:
         """Run a chapter synchronously and wait for completion."""
-        if self.is_running:
-            return {"error": "Pipeline already running"}
-        self._db = db
-        self._orchestrator = self._create_orchestrator(db)
+        runtime = self._runtime_for_db(db)
+        if self._is_runtime_running(runtime) or not runtime.sync_run_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Pipeline already running")
 
+        orchestrator: Optional[Any] = None
         try:
-            await self._orchestrator.run_chapter(chapter_num)
-            # Get the chapter result from StateDB
+            orchestrator = self._create_orchestrator(db)
+            runtime.db = db
+            runtime.orchestrator = orchestrator
+            runtime.sync_running = True
+
+            result = await orchestrator.run_chapter(chapter_num)
             ch = db.get_chapter(chapter_num)
+            status_from_result = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
             return {
                 "chapter_num": chapter_num,
-                "status": ch.status if ch else "unknown",
+                "status": ch.status if ch else status_from_result,
+                "mode": "model" if hasattr(orchestrator, "_has_api_key") and orchestrator._has_api_key() else "fallback",
             }
-        except Exception as e:
-            return {"chapter_num": chapter_num, "status": "failed", "error": str(e)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Chapter generation failed for chapter %s (type=%s)",
+                chapter_num,
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=500, detail="Chapter generation failed") from exc
+        finally:
+            runtime.sync_running = False
+            runtime.task = None
+            runtime.orchestrator = None
+            runtime.db = None
+            runtime.sync_run_lock.release()
+            self._clear_runtime(db)
 
     async def start_batch(self, start: int, end: int, db: StateDB) -> Dict[str, Any]:
         """Start batch generation in the background."""
-        if self.is_running:
+        runtime = self._runtime_for_db(db)
+        if not runtime.sync_run_lock.acquire(blocking=False):
             return {"error": "Pipeline already running", "started": False}
-        self._db = db
-        self._orchestrator = self._create_orchestrator(db)
 
-        async def _run():
-            try:
-                await self._orchestrator.run_batch(start, end)
-            except Exception:
-                pass
+        try:
+            if self._is_runtime_running(runtime):
+                return {"error": "Pipeline already running", "started": False}
+            runtime.db = db
+            runtime.orchestrator = self._create_orchestrator(db)
 
-        self._task = asyncio.create_task(_run())
-        return {"started": True, "start": start, "end": end}
+            async def _run():
+                try:
+                    await runtime.orchestrator.run_batch(start, end)
+                except Exception:
+                    pass
+                finally:
+                    self._clear_runtime(db)
+
+            runtime.task = asyncio.create_task(_run())
+            return {"started": True, "start": start, "end": end}
+        finally:
+            runtime.sync_run_lock.release()
 
     async def run_batch_sync(self, start: int, end: int, db: StateDB) -> Dict[str, Any]:
         """Run batch synchronously and wait for completion."""
-        if self.is_running:
-            return {"error": "Pipeline already running"}
-        self._db = db
-        self._orchestrator = self._create_orchestrator(db)
+        runtime = self._runtime_for_db(db)
+        if self._is_runtime_running(runtime) or not runtime.sync_run_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Pipeline already running")
 
+        orchestrator: Optional[Any] = None
         try:
-            results = await self._orchestrator.run_batch(start, end)
-            return {"results": {str(k): v for k, v in results.items()}}
-        except Exception as e:
-            return {"error": str(e)}
+            orchestrator = self._create_orchestrator(db)
+            runtime.db = db
+            runtime.orchestrator = orchestrator
+            runtime.sync_running = True
 
-    def pause(self) -> Dict[str, str]:
-        if self._orchestrator:
-            self._orchestrator.pause()
+            results = await orchestrator.run_batch(start, end)
+            return {"results": {str(k): v for k, v in results.items()}}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Batch generation failed for chapters %s-%s (type=%s)",
+                start,
+                end,
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=500, detail="Batch generation failed") from exc
+        finally:
+            runtime.sync_running = False
+            runtime.task = None
+            runtime.orchestrator = None
+            runtime.db = None
+            runtime.sync_run_lock.release()
+            self._clear_runtime(db)
+
+    def pause(self, db: StateDB) -> Dict[str, str]:
+        runtime = self._runtimes.get(self._project_key(db))
+        if runtime and runtime.orchestrator:
+            runtime.orchestrator.pause()
             return {"message": "Pipeline paused"}
         return {"message": "No pipeline running"}
 
-    def resume(self) -> Dict[str, str]:
-        if self._orchestrator:
-            self._orchestrator.resume()
+    def resume(self, db: StateDB) -> Dict[str, str]:
+        runtime = self._runtimes.get(self._project_key(db))
+        if runtime and runtime.orchestrator:
+            runtime.orchestrator.resume()
             return {"message": "Pipeline resumed"}
         return {"message": "No pipeline running"}
 
-    def stop(self) -> Dict[str, str]:
-        if self._orchestrator:
-            self._orchestrator.stop()
-        if self._task and not self._task.done():
-            self._task.cancel()
-        self._task = None
-        self._orchestrator = None
-        self._db = None
+    def stop(self, db: StateDB) -> Dict[str, str]:
+        runtime = self._runtimes.get(self._project_key(db))
+        if runtime is None:
+            return {"message": "No pipeline running"}
+        stop_orchestrator = getattr(runtime.orchestrator, "stop", None)
+        if callable(stop_orchestrator):
+            stop_orchestrator()
+        if runtime.task and not runtime.task.done():
+            runtime.task.cancel()
+        self._clear_runtime(db)
         return {"message": "Pipeline stopped"}
 
-    def get_status(self) -> Dict[str, Any]:
-        if self._orchestrator:
-            status = self._orchestrator.status
-            status["task_alive"] = self.is_running
-            return status
-        return {"running": False, "paused": False, "task_alive": False}
+    def get_status(self, db: Optional[StateDB] = None) -> Dict[str, Any]:
+        if db is None:
+            return {"running": False, "paused": False, "task_alive": False}
+        runtime = self._runtimes.get(self._project_key(db))
+        if runtime is None or runtime.orchestrator is None:
+            return {"running": False, "paused": False, "task_alive": False}
+        status = dict(runtime.orchestrator.status)
+        status["task_alive"] = self._is_runtime_running(runtime)
+        return status
 
 
-# Global singleton
-_pipeline_manager = PipelineManager()
+from Engine.core.project_manager import ProjectInfo, ProjectManager
 
-from Engine.core.project_manager import ProjectManager
+ACTIVE_PROJECT_COOKIE = "inkfoundry_active_project_id"
+
 
 # Token tracker singleton (initialized with db in lifespan)
 _token_tracker: Optional[TokenTracker] = None
 
 
-def _get_token_tracker() -> "TokenTracker":
+def _get_token_tracker(db: Optional[StateDB] = None) -> "TokenTracker":
     from Engine.core.token_tracker import TokenTracker
     global _token_tracker
-    if _token_tracker is None:
-        _token_tracker = TokenTracker()
+    if db is None:
+        if _token_tracker is None:
+            _token_tracker = TokenTracker()
+        return _token_tracker
+
+    if _token_tracker is None or getattr(_token_tracker, "_state_db", None) is not db:
+        _token_tracker = TokenTracker(state_db=db)
     return _token_tracker
 
 
@@ -349,9 +468,65 @@ def _init_token_tracker(db: StateDB) -> None:
     _token_tracker = TokenTracker(state_db=db)
 
 
-def _get_db(request: Request) -> StateDB:
-    """Dependency injection for StateDB."""
-    return request.app.state.db
+def _resolve_active_project_id(request: Request) -> Optional[str]:
+    project_id = request.cookies.get(ACTIVE_PROJECT_COOKIE)
+    if not project_id:
+        return None
+    project_id = project_id.strip()
+    return project_id or None
+
+
+def _should_use_secure_cookie(request: Request) -> bool:
+    return request.url.scheme == "https"
+
+
+def _build_clear_active_project_cookie_header(request: Request) -> str:
+    secure = _should_use_secure_cookie(request)
+    response = Response()
+    response.delete_cookie(
+        ACTIVE_PROJECT_COOKIE,
+        path="/",
+        secure=secure,
+        httponly=True,
+        samesite="lax",
+    )
+    header = response.headers.get("set-cookie")
+    if header:
+        return header
+    secure_suffix = "; Secure" if secure else ""
+    return f"{ACTIVE_PROJECT_COOKIE}=; Max-Age=0; Path=/; SameSite=lax; HttpOnly{secure_suffix}"
+
+
+def _raise_inactive_project_selection(request: Request) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail="Active project is no longer available; please reselect a project",
+        headers={"set-cookie": _build_clear_active_project_cookie_header(request)},
+    )
+
+
+def _open_project_db(db_path: str) -> Iterator[StateDB]:
+    db = StateDB(db_path)
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _get_db(request: Request, response: Response) -> Iterator[StateDB]:
+    """Dependency injection for request-scoped StateDB."""
+    project_manager = _get_project_manager(request)
+    project_id = _resolve_active_project_id(request)
+    if not project_id:
+        yield request.app.state.db
+        return
+
+    info = _get_active_catalog_project(project_manager, project_id)
+    if info is None:
+        _clear_active_project_cookie(request, response)
+        _raise_inactive_project_selection(request)
+
+    yield from _open_project_db(info.db_path)
 
 
 def _get_project_manager(request: Request) -> ProjectManager:
@@ -439,6 +614,186 @@ def _get_engine_config_or_http(db: StateDB):
         return _get_engine_config(db)
     except InvalidLLMConfigError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _require_real_chapter_model(db: StateDB) -> EngineConfig:
+    """Require a real model configuration before chapter generation."""
+    config = _get_engine_config_or_http(db)
+    if config is None or not config.llm.api_key:
+        raise HTTPException(
+            status_code=422,
+            detail="A real LLM configuration is required before generating chapters",
+        )
+    return config
+
+
+def _normalize_target_chapters(value: Optional[int], default: int = 100) -> int:
+    if value is None:
+        return default
+    if value < 1 or value > 1000:
+        raise HTTPException(status_code=422, detail="target_chapters must be between 1 and 1000")
+    return value
+
+
+def _get_project_brief(db: StateDB) -> Dict[str, Any]:
+    brief = db.get_state("project_brief") or {}
+    if not isinstance(brief, dict):
+        return {}
+    return brief
+
+
+def _fallback_project_status() -> Dict[str, Any]:
+    return {
+        "id": "novel-001",
+        "title": "Untitled Novel",
+        "genre": "fiction",
+        "current_chapter": 1,
+        "total_chapters": 10,
+        "status": "error",
+    }
+
+
+def _derive_current_chapter(chapters: List[Dict[str, Any]], total_chapters: int) -> int:
+    if total_chapters <= 0:
+        return 1
+
+    chapter_status_map = {
+        int(chapter.get("chapter_num")): str(chapter.get("status") or "")
+        for chapter in chapters
+        if isinstance(chapter.get("chapter_num"), int)
+    }
+    completed_statuses = {"reviewed", "final"}
+
+    for chapter_num in range(1, total_chapters + 1):
+        if chapter_status_map.get(chapter_num) not in completed_statuses:
+            return chapter_num
+    return total_chapters
+
+
+def _derive_project_status(completed: int, total_chapters: int, pipeline_status: Dict[str, Any]) -> str:
+    if pipeline_status.get("paused"):
+        return "paused"
+    if pipeline_status.get("running"):
+        return "running"
+    if completed >= total_chapters and total_chapters > 0:
+        return "completed"
+    return "idle"
+
+
+def _build_project_status(db: StateDB, pipeline_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    brief = _get_project_brief(db)
+    config = _load_stored_config(db)
+    title = brief.get("title") or config.get("novel_title") or "Untitled Novel"
+    genre = brief.get("genre") or config.get("genre") or "fiction"
+
+    chapters = [
+        {
+            "chapter_num": ch.chapter_num,
+            "title": ch.title,
+            "content": ch.content,
+            "status": ch.status,
+            "word_count": ch.word_count,
+            "tension_level": ch.tension_level,
+            "created_at": ch.created_at,
+            "updated_at": ch.updated_at,
+        }
+        for ch in db.list_chapters()
+    ]
+    total_chapters = len(chapters)
+    completed = sum(1 for c in chapters if c.get("status") in ("reviewed", "final"))
+
+    outline = db.get_outline()
+    if outline:
+        total_chapters = max(total_chapters, outline.total_chapters or total_chapters)
+    elif brief.get("target_chapters"):
+        total_chapters = max(total_chapters, _normalize_target_chapters(brief.get("target_chapters"), default=100))
+
+    resolved_pipeline_status = pipeline_status if pipeline_status is not None else {"running": False, "paused": False, "task_alive": False}
+
+    return {
+        "id": "novel-001",
+        "title": title,
+        "genre": genre,
+        "current_chapter": _derive_current_chapter(chapters, total_chapters),
+        "total_chapters": total_chapters,
+        "status": _derive_project_status(completed, total_chapters, resolved_pipeline_status),
+    }
+
+
+def _safe_project_status(db: StateDB, pipeline_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        return _build_project_status(db, pipeline_status=pipeline_status)
+    except Exception:
+        logger.exception("Failed to compute project status")
+        return _fallback_project_status()
+
+
+def _get_pipeline_manager(request: Request) -> PipelineManager:
+    return request.app.state.pipeline_manager
+
+
+def _build_project_payload(info: ProjectInfo) -> Dict[str, Any]:
+    project = {
+        "id": info.id,
+        "title": info.title,
+        "genre": info.genre,
+        "created_at": info.created_at,
+        "last_modified": info.last_modified,
+        "status": info.status,
+    }
+    try:
+        project_db = StateDB(info.db_path)
+    except Exception:
+        project.setdefault("summary", "")
+        project.setdefault("target_chapters", 100)
+        return project
+
+    try:
+        brief = _get_project_brief(project_db)
+        project["summary"] = brief.get("summary", "")
+        raw_target_chapters = brief.get("target_chapters")
+        if isinstance(raw_target_chapters, int) and 1 <= raw_target_chapters <= 1000:
+            project["target_chapters"] = raw_target_chapters
+        else:
+            project["target_chapters"] = 100
+
+        outline = project_db.get_outline()
+        chapters = project_db.list_chapters()
+        project["outline_total_chapters"] = outline.total_chapters if outline else 0
+        project["total_chapters"] = len(chapters)
+        project["latest_chapter"] = max((c.chapter_num for c in chapters), default=0)
+    finally:
+        project_db.close()
+
+    return project
+
+
+def _get_active_catalog_project(project_manager: ProjectManager, project_id: str) -> Optional[ProjectInfo]:
+    info = project_manager.get_project(project_id)
+    if info is None or info.status != "active":
+        return None
+    return info
+
+
+def _clear_active_project_cookie(request: Request, response: Response) -> None:
+    response.delete_cookie(
+        ACTIVE_PROJECT_COOKIE,
+        path="/",
+        secure=_should_use_secure_cookie(request),
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _set_active_project_cookie(request: Request, response: Response, project_id: str) -> None:
+    response.set_cookie(
+        ACTIVE_PROJECT_COOKIE,
+        project_id,
+        httponly=True,
+        samesite="lax",
+        path="/",
+        secure=_should_use_secure_cookie(request),
+    )
 
 
 def _seed_sample_data(db: StateDB) -> None:
@@ -605,7 +960,9 @@ def create_app(
         )
         db = StateDB(resolved_db_path)
         app.state.db = db
+        app.state.default_db_path = resolved_db_path
         app.state.project_manager = ProjectManager(resolved_projects_dir)
+        app.state.pipeline_manager = PipelineManager()
         if seed_data:
             _seed_sample_data(db)
         _init_token_tracker(db)
@@ -616,9 +973,12 @@ def create_app(
 
     # --- Status & Health ---
     @app.get("/status")
-    def get_status() -> ProjectStatus:
+    def get_status(
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> ProjectStatus:
         """Get the current project status."""
-        return ProjectStatus()
+        return ProjectStatus(**_safe_project_status(db, pipeline_status=pipeline_manager.get_status(db)))
 
     @app.get("/health")
     def health_check() -> Dict[str, bool]:
@@ -857,7 +1217,20 @@ def create_app(
     @app.post("/api/outlines/generate")
     async def generate_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         from Engine.agents.outline import OutlineAgent
+
         config = _get_engine_config_or_http(db)
+        project_brief = _get_project_brief(db)
+        genre = (body.genre or project_brief.get("genre") or "xuanhuan").strip() or "xuanhuan"
+        title = (body.title or project_brief.get("title") or "Untitled").strip() or "Untitled"
+        summary = (body.summary if body.summary is not None else project_brief.get("summary") or "").strip()
+        total_chapters = _normalize_target_chapters(
+            body.total_chapters if body.total_chapters is not None else project_brief.get("target_chapters"),
+            default=100,
+        )
+
+        if not summary:
+            raise HTTPException(status_code=422, detail="Project summary is required before generating an outline")
+
         agent = OutlineAgent()
         if config and config.llm.api_key:
             agent = OutlineAgent(
@@ -866,33 +1239,49 @@ def create_app(
                 base_url=config.llm.base_url,
             )
             outline = await agent.arun(
-                genre=body.genre,
-                title=body.title,
-                summary=body.summary,
-                total_chapters=body.total_chapters,
+                genre=genre,
+                title=title,
+                summary=summary,
+                total_chapters=total_chapters,
             )
         else:
             outline = agent.run(
-                genre=body.genre,
-                title=body.title,
-                summary=body.summary,
-                total_chapters=body.total_chapters,
+                genre=genre,
+                title=title,
+                summary=summary,
+                total_chapters=total_chapters,
             )
         db.save_outline(outline)
-        return {"message": "Outline generated", "outline": outline.model_dump()}
+        return {
+            "message": "Outline generated",
+            "outline": outline.model_dump(),
+            "mode": "model" if config and config.llm.api_key else "fallback",
+        }
 
     @app.put("/api/outlines")
     def update_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
         from Engine.agents.outline import OutlineAgent
+
+        project_brief = _get_project_brief(db)
+        genre = (body.genre or project_brief.get("genre") or "xuanhuan").strip() or "xuanhuan"
+        title = (body.title or project_brief.get("title") or "Untitled").strip() or "Untitled"
+        summary = (body.summary if body.summary is not None else project_brief.get("summary") or "").strip()
+        total_chapters = _normalize_target_chapters(
+            body.total_chapters if body.total_chapters is not None else project_brief.get("target_chapters"),
+            default=100,
+        )
+        if not summary:
+            raise HTTPException(status_code=422, detail="Project summary is required before generating an outline")
+
         agent = OutlineAgent()
         outline = agent.run(
-            genre="xuanhuan",
-            title=body.title,
-            summary=body.summary,
-            total_chapters=body.total_chapters,
+            genre=genre,
+            title=title,
+            summary=summary,
+            total_chapters=total_chapters,
         )
         db.save_outline(outline)
-        return {"message": "Outline updated", "outline": outline.model_dump()}
+        return {"message": "Outline updated", "outline": outline.model_dump(), "mode": "fallback"}
 
     # --- Character Profiles ---
     @app.get("/api/profiles")
@@ -1035,9 +1424,14 @@ def create_app(
 
     # --- Pipeline Control ---
     @app.post("/api/pipeline/run-chapter/{chapter_num}")
-    async def run_chapter(chapter_num: int, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+    async def run_chapter(
+        chapter_num: int,
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> Dict[str, Any]:
         """Run a single chapter and wait for completion."""
-        return await _pipeline_manager.run_chapter_sync(chapter_num, db)
+        _require_real_chapter_model(db)
+        return await pipeline_manager.run_chapter_sync(chapter_num, db)
 
     # --- Review ---
     @app.post("/api/review/approve/{chapter_num}")
@@ -1065,29 +1459,45 @@ def create_app(
         return {"message": f"Chapter {chapter_num} rejected"}
 
     @app.post("/api/pipeline/run-batch")
-    async def run_batch(body: PipelineStart, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+    async def run_batch(
+        body: PipelineStart,
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> Dict[str, Any]:
         """Run batch and wait for completion."""
-        return await _pipeline_manager.run_batch_sync(body.start_chapter, body.end_chapter, db)
+        return await pipeline_manager.run_batch_sync(body.start_chapter, body.end_chapter, db)
 
     @app.get("/api/pipeline/status")
-    def pipeline_status() -> Dict[str, Any]:
-        """Get current pipeline status."""
-        return _pipeline_manager.get_status()
+    def pipeline_status(
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> Dict[str, Any]:
+        """Get current pipeline status for the resolved project context."""
+        return pipeline_manager.get_status(db)
 
     @app.post("/api/pipeline/pause")
-    def pipeline_pause() -> Dict[str, str]:
+    def pipeline_pause(
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> Dict[str, str]:
         """Pause the pipeline."""
-        return _pipeline_manager.pause()
+        return pipeline_manager.pause(db)
 
     @app.post("/api/pipeline/resume")
-    def pipeline_resume() -> Dict[str, str]:
+    def pipeline_resume(
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> Dict[str, str]:
         """Resume the pipeline."""
-        return _pipeline_manager.resume()
+        return pipeline_manager.resume(db)
 
     @app.post("/api/pipeline/stop")
-    def pipeline_stop() -> Dict[str, str]:
+    def pipeline_stop(
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> Dict[str, str]:
         """Stop the pipeline."""
-        return _pipeline_manager.stop()
+        return pipeline_manager.stop(db)
 
     # --- Novel Export ---
     @app.post("/api/export")
@@ -1145,24 +1555,7 @@ def create_app(
     def list_projects(project_manager: ProjectManager = Depends(_get_project_manager)) -> Dict[str, Any]:
         """List all active projects with chapter stats."""
         projects = project_manager.list_projects(status="active")
-        result = []
-        for p in projects:
-            proj_dict = p.__dict__.copy()
-            # Enrich with chapter stats from the project's own StateDB
-            try:
-                from Engine.core.state_db import StateDB
-                db = StateDB(p.db_path)
-                chapters = db.list_chapters()
-                proj_dict["total_chapters"] = len(chapters)
-                proj_dict["latest_chapter"] = (
-                    max((c.chapter_num for c in chapters), default=0)
-                )
-                db.close()
-            except Exception:
-                proj_dict["total_chapters"] = 0
-                proj_dict["latest_chapter"] = 0
-            result.append(proj_dict)
-        return {"projects": result}
+        return {"projects": [_build_project_payload(project) for project in projects]}
 
     @app.post("/api/projects")
     def create_project(
@@ -1170,8 +1563,38 @@ def create_app(
         project_manager: ProjectManager = Depends(_get_project_manager),
     ) -> Dict[str, Any]:
         """Create a new project."""
-        info = project_manager.create_project(title=body.title, genre=body.genre)
-        return {"message": f"Project '{body.title}' created", "project": info.__dict__}
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="Project title is required")
+        summary = body.summary.strip()
+        if not summary:
+            raise HTTPException(status_code=422, detail="Project summary is required")
+        target_chapters = _normalize_target_chapters(body.target_chapters, default=100)
+        info = project_manager.create_project(
+            title=title,
+            genre=body.genre,
+            summary=summary,
+            target_chapters=target_chapters,
+        )
+        return {"message": f"Project '{title}' created", "project": _build_project_payload(info)}
+
+    @app.get("/api/projects/active")
+    def get_active_project(
+        request: Request,
+        response: Response,
+        project_manager: ProjectManager = Depends(_get_project_manager),
+    ) -> Dict[str, Any]:
+        """Get the currently active project for this client session, if any."""
+        project_id = _resolve_active_project_id(request)
+        if not project_id:
+            return {"project": None}
+
+        info = _get_active_catalog_project(project_manager, project_id)
+        if info is None:
+            _clear_active_project_cookie(request, response)
+            return {"project": None}
+
+        return {"project": _build_project_payload(info)}
 
     @app.get("/api/projects/{project_id}")
     def get_project(
@@ -1182,42 +1605,38 @@ def create_app(
         info = project_manager.get_project(project_id)
         if info is None:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
-        return {"project": info.__dict__}
+        return {"project": _build_project_payload(info)}
 
     @app.delete("/api/projects/{project_id}")
     def delete_project(
         project_id: str,
+        request: Request,
+        response: Response,
         project_manager: ProjectManager = Depends(_get_project_manager),
     ) -> Dict[str, str]:
         """Soft-delete a project."""
         success = project_manager.delete_project(project_id)
         if not success:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+
+        if _resolve_active_project_id(request) == project_id:
+            _clear_active_project_cookie(request, response)
+
         return {"message": f"Project '{project_id}' deleted"}
 
     @app.post("/api/projects/{project_id}/activate")
     def activate_project(
         project_id: str,
         request: Request,
+        response: Response,
         project_manager: ProjectManager = Depends(_get_project_manager),
     ) -> Dict[str, str]:
-        """Switch to a different project — updates the active DB."""
-        info = project_manager.get_project(project_id)
+        """Select a project for this client session."""
+        info = _get_active_catalog_project(project_manager, project_id)
         if info is None:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
 
-        _pipeline_manager.stop()
-
-        # Swap the DB on the app state
-        from Engine.core.state_db import StateDB
-        old_db = request.app.state.db
-        new_db = StateDB(info.db_path)
-        request.app.state.db = new_db
-        request.app.state.current_project_id = project_id
-        _init_token_tracker(new_db)
-
-        if old_db:
-            old_db.close()
+        _set_active_project_cookie(request, response, project_id)
 
         return {"message": f"Switched to project '{info.title}'"}
 
@@ -1287,53 +1706,12 @@ def create_app(
         return {"message": f"Snapshot v{version} deleted"}
 
     @app.get("/api/status")
-    def api_status(db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+    def api_status(
+        db: StateDB = Depends(_get_db),
+        pipeline_manager: PipelineManager = Depends(_get_pipeline_manager),
+    ) -> Dict[str, Any]:
         """Get project status from database."""
-        import json
-        # Read config from database
-        title = "Untitled Novel"
-        genre = "fiction"
-        try:
-            cursor = db.conn.execute("SELECT data FROM state WHERE key = 'config'")
-            row = cursor.fetchone()
-            if row:
-                cfg = json.loads(row[0])
-                if cfg.get("novel_title"):
-                    title = cfg["novel_title"]
-                if cfg.get("genre"):
-                    genre = cfg["genre"]
-        except Exception:
-            pass
-
-        # Count chapters
-        cursor = db.conn.execute("SELECT chapter_num, title, content, status, word_count, tension_level, created_at, updated_at FROM chapters")
-        chapters = []
-        for row in cursor.fetchall():
-            chapters.append({
-                "chapter_num": row[0], "title": row[1], "content": row[2],
-                "status": row[3], "word_count": row[4], "tension_level": row[5],
-                "created_at": row[6], "updated_at": row[7],
-            })
-        total_chapters = len(chapters)
-        completed = sum(1 for c in chapters if c.get("status") in ("reviewed", "final"))
-
-        # Read outline for total chapters
-        try:
-            cursor = db.conn.execute("SELECT title, summary, total_chapters, arc FROM outlines LIMIT 1")
-            row = cursor.fetchone()
-            if row:
-                total_chapters = max(total_chapters, row[2] or total_chapters)
-        except Exception:
-            pass
-
-        return {
-            "id": "novel-001",
-            "title": title,
-            "genre": genre,
-            "current_chapter": completed + 1 if completed > 0 else 1,
-            "total_chapters": total_chapters,
-            "status": "active" if completed > 0 else "idle",
-        }
+        return _safe_project_status(db, pipeline_status=pipeline_manager.get_status(db))
 
     @app.get("/api/characters")
     def api_list_characters(db: StateDB = Depends(_get_db)) -> Dict[str, List[Dict[str, Any]]]:

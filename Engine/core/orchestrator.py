@@ -46,6 +46,43 @@ class PipelineOrchestrator:
         if self.event_bus:
             self.event_bus.publish(event_type, data)
 
+    def _get_project_brief(self) -> Dict[str, Any]:
+        """Load the current project brief from StateDB."""
+        brief = self.state_db.get_state("project_brief") or {}
+        return brief if isinstance(brief, dict) else {}
+
+    def _get_outline_context(self, chapter_num: int) -> tuple[Any, str, int]:
+        """Return validated outline context for chapter generation."""
+        outline = self.state_db.get_outline()
+        if outline is None:
+            raise ValueError("outline is required before generating a chapter")
+
+        total_chapters = outline.total_chapters
+        if chapter_num < 1 or chapter_num > total_chapters:
+            raise ValueError(
+                f"chapter {chapter_num} is out of range for outline with {total_chapters} chapters"
+            )
+
+        chapter_info = next(
+            (
+                chapter
+                for chapter in outline.chapter_summaries
+                if isinstance(chapter, dict) and chapter.get("chapter_num") == chapter_num
+            ),
+            None,
+        )
+        if chapter_info is None and chapter_num <= len(outline.chapter_summaries):
+            fallback_info = outline.chapter_summaries[chapter_num - 1]
+            chapter_info = fallback_info if isinstance(fallback_info, dict) else None
+        if chapter_info is None:
+            raise ValueError(f"chapter summary missing for chapter {chapter_num}")
+
+        chapter_summary = str(chapter_info.get("summary") or "").strip()
+        if not chapter_summary:
+            raise ValueError(f"chapter summary missing for chapter {chapter_num}")
+
+        return outline, chapter_summary, total_chapters
+
     async def run_chapter(self, chapter_num: int) -> Dict[str, Any]:
         """Execute the full pipeline for a single chapter.
 
@@ -74,12 +111,8 @@ class PipelineOrchestrator:
 
         try:
             # Step 1: Get outline context
-            outline = self.state_db.get_outline()
-            chapter_summary = ""
-            total_chapters = outline.total_chapters if outline else 100
-            if outline and chapter_num <= len(outline.chapter_summaries):
-                ch_info = outline.chapter_summaries[chapter_num - 1]
-                chapter_summary = ch_info.get("summary", f"Chapter {chapter_num}")
+            outline, chapter_summary, total_chapters = self._get_outline_context(chapter_num)
+            project_brief = self._get_project_brief()
 
             self._publish("pipeline_progress", {
                 "chapter": chapter_num,
@@ -135,6 +168,7 @@ class PipelineOrchestrator:
                 task_card=task_card,
                 chapter_summary=chapter_summary,
                 historical_context=historical_context,
+                project_brief=project_brief,
             )
 
             self._publish("pipeline_progress", {
@@ -268,8 +302,12 @@ class PipelineOrchestrator:
         return False
 
     async def _run_writer(
-        self, chapter_num: int, task_card: dict, chapter_summary: str,
+        self,
+        chapter_num: int,
+        task_card: dict,
+        chapter_summary: str,
         historical_context: str = "",
+        project_brief: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Run WriterAgent — real LLM if configured, fallback to mock."""
         from Engine.agents.writer import WriterAgent
@@ -292,6 +330,7 @@ class PipelineOrchestrator:
                     "task_card": task_card,
                     "chapter_summary": chapter_summary,
                     "historical_context": historical_context,
+                    "project_brief": project_brief or {},
                 }),
                 timeout=120,
             )
@@ -302,6 +341,8 @@ class PipelineOrchestrator:
             "chapter_num": chapter_num,
             "task_card": task_card,
             "chapter_summary": chapter_summary,
+            "historical_context": historical_context,
+            "project_brief": project_brief or {},
         })
 
     def _inject_voice(self, system_prompt: str) -> str:

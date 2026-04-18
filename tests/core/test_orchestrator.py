@@ -1,11 +1,13 @@
 """Tests for PipelineOrchestrator."""
 import asyncio
+from unittest.mock import AsyncMock
+
 import pytest
 
+from Engine.core.event_bus import EventBus
+from Engine.core.models import Outline
 from Engine.core.orchestrator import PipelineOrchestrator
 from Engine.core.state_db import StateDB
-from Engine.core.event_bus import EventBus
-from Engine.core.models import Chapter, Outline
 
 
 @pytest.fixture
@@ -13,6 +15,24 @@ def db():
     db = StateDB(":memory:")
     yield db
     db.close()
+
+
+def _make_outline(total_chapters: int = 10, missing_summary_at: int | None = None) -> Outline:
+    chapter_summaries = []
+    for chapter_num in range(1, total_chapters + 1):
+        summary = "" if chapter_num == missing_summary_at else f"第{chapter_num}章概要"
+        chapter_summaries.append({
+            "chapter_num": chapter_num,
+            "summary": summary,
+            "tension": min(10, 4 + chapter_num),
+        })
+    return Outline(
+        title="Test",
+        summary="Test outline",
+        total_chapters=total_chapters,
+        chapter_summaries=chapter_summaries,
+        tension_curve=[chapter["tension"] for chapter in chapter_summaries],
+    )
 
 
 def test_orchestrator_init(db):
@@ -25,8 +45,7 @@ def test_orchestrator_init(db):
 
 def test_orchestrator_run_chapter_saves_result(db):
     """Test that run_chapter saves the chapter to StateDB."""
-    outline = Outline(title="Test", summary="Test", total_chapters=10)
-    db.save_outline(outline)
+    db.save_outline(_make_outline())
 
     orb = PipelineOrchestrator(state_db=db)
     result = asyncio.run(orb.run_chapter(chapter_num=1))
@@ -45,16 +64,53 @@ def test_orchestrator_run_chapter_publishes_events(db):
     bus.subscribe("pipeline_progress", lambda data: events.append(data))
     bus.subscribe("chapter_complete", lambda data: events.append(data))
 
-    outline = Outline(title="Test", summary="Test", total_chapters=10)
-    db.save_outline(outline)
+    db.save_outline(_make_outline())
 
     orb = PipelineOrchestrator(state_db=db, event_bus=bus)
     asyncio.run(orb.run_chapter(chapter_num=1))
 
     assert len(events) > 0
-    # Should have at least a starting event
     event_types = [e.get("step", "") for e in events if isinstance(e, dict)]
     assert "starting" in event_types
+
+
+def test_orchestrator_requires_outline_before_generating(db):
+    """Test that chapter generation fails fast without an outline."""
+    orb = PipelineOrchestrator(state_db=db)
+    orb._run_writer = AsyncMock(return_value="draft")
+    orb._run_editor = AsyncMock(return_value={"score": 80, "issues": []})
+    orb._run_redteam = AsyncMock(return_value={"severity": "low", "feedback": "ok"})
+
+    with pytest.raises(ValueError, match="outline"):
+        asyncio.run(orb.run_chapter(chapter_num=1))
+
+    orb._run_writer.assert_not_awaited()
+    orb._run_editor.assert_not_awaited()
+    orb._run_redteam.assert_not_awaited()
+
+
+def test_orchestrator_rejects_chapter_out_of_range(db):
+    """Test that chapter generation rejects requests beyond the outline range."""
+    db.save_outline(_make_outline(total_chapters=2))
+    orb = PipelineOrchestrator(state_db=db)
+    orb._run_writer = AsyncMock(return_value="draft")
+
+    with pytest.raises(ValueError, match="out of range"):
+        asyncio.run(orb.run_chapter(chapter_num=3))
+
+    orb._run_writer.assert_not_awaited()
+
+
+def test_orchestrator_requires_chapter_summary(db):
+    """Test that chapter generation requires a non-empty chapter summary."""
+    db.save_outline(_make_outline(total_chapters=3, missing_summary_at=2))
+    orb = PipelineOrchestrator(state_db=db)
+    orb._run_writer = AsyncMock(return_value="draft")
+
+    with pytest.raises(ValueError, match="chapter summary"):
+        asyncio.run(orb.run_chapter(chapter_num=2))
+
+    orb._run_writer.assert_not_awaited()
 
 
 def test_orchestrator_status(db):
@@ -87,8 +143,7 @@ def test_orchestrator_stop(db):
 
 def test_orchestrator_run_batch(db):
     """Test run_batch for multiple chapters."""
-    outline = Outline(title="Test", summary="Test", total_chapters=10)
-    db.save_outline(outline)
+    db.save_outline(_make_outline())
 
     orb = PipelineOrchestrator(state_db=db)
     results = asyncio.run(orb.run_batch(start=1, end=3))

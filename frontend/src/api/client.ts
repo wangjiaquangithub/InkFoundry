@@ -1,5 +1,42 @@
 import axios from "axios";
-import type { Outline, CharacterProfile, WorldBuilding } from "../types";
+import type { Outline, CharacterProfile, WorldBuilding, NovelProject } from "../types";
+
+export interface ProjectRecord {
+  id: string;
+  title: string;
+  genre: string;
+  summary: string;
+  target_chapters: number;
+  created_at: string;
+  last_modified: string;
+  status: string;
+  total_chapters?: number;
+  latest_chapter?: number;
+  outline_total_chapters?: number;
+}
+
+export interface OutlineGenerateResponse {
+  message: string;
+  outline: Outline;
+  mode: "model" | "fallback";
+}
+
+export interface ChapterRunResponse {
+  chapter_num: number;
+  status: string;
+  error?: string;
+  detail?: string;
+  mode?: "model" | "fallback";
+}
+
+export interface ApiStatusResponse {
+  id: string;
+  title: string;
+  genre: string;
+  current_chapter: number;
+  total_chapters: number;
+  status: NovelProject["status"];
+}
 
 export interface SnapshotRecord {
   version: number;
@@ -34,7 +71,7 @@ const client = axios.create({
 
 export const api = {
   health: () => client.get("/health"),
-  status: () => client.get("/api/status"),
+  status: () => client.get<ApiStatusResponse>("/api/status"),
 
   // Chapters
   getChapters: () => client.get("/api/chapters"),
@@ -75,12 +112,12 @@ export const api = {
   // Outlines
   getOutline: () => client.get("/api/outlines"),
   generateOutline: (data: { genre?: string; title?: string; summary?: string; total_chapters?: number }) =>
-    client.post("/api/outlines/generate", data),
+    client.post<OutlineGenerateResponse>("/api/outlines/generate", data),
   updateOutline: (data: Partial<Outline>) =>
     client.put("/api/outlines", data),
 
   // Pipeline
-  runChapter: (num: number) => client.post(`/api/pipeline/run-chapter/${num}`),
+  runChapter: (num: number) => client.post<ChapterRunResponse>(`/api/pipeline/run-chapter/${num}`),
   runBatch: (data: { start_chapter: number; end_chapter: number }) =>
     client.post("/api/pipeline/run-batch", data),
   getPipelineStatus: () => client.get("/api/pipeline/status"),
@@ -116,10 +153,11 @@ export const api = {
     client.post("/api/export", { format }),
 
   // Projects
-  listProjects: () => client.get("/api/projects"),
-  createProject: (data: { title: string; genre?: string }) =>
-    client.post("/api/projects", data),
-  getProject: (id: string) => client.get(`/api/projects/${id}`),
+  listProjects: () => client.get<{ projects: ProjectRecord[] }>("/api/projects"),
+  createProject: (data: { title: string; genre?: string; summary: string; target_chapters?: number }) =>
+    client.post<{ message: string; project: ProjectRecord }>("/api/projects", data),
+  getActiveProject: () => client.get<{ project: ProjectRecord | null }>("/api/projects/active"),
+  getProject: (id: string) => client.get<{ project: ProjectRecord }>(`/api/projects/${id}`),
   deleteProject: (id: string) => client.delete(`/api/projects/${id}`),
   activateProject: (id: string) => client.post(`/api/projects/${id}/activate`),
 

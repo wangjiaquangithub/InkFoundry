@@ -1,4 +1,6 @@
 """Tests for WriterAgent."""
+import pytest
+
 from Engine.agents.writer import WriterAgent
 
 
@@ -29,16 +31,10 @@ def test_writer_accepts_gateway_parameter():
 def test_writer_gateway_is_lazy():
     """WriterAgent creates gateway lazily via _get_gateway()."""
     agent = WriterAgent("test-model", "prompt", api_key="test-key", base_url="http://test")
-    # No gateway yet
     assert agent._gateway is None
-    # _get_gateway creates one
     gw = agent._get_gateway()
     assert gw is not None
     assert gw.model == "test-model"
-
-
-import asyncio
-import pytest
 
 
 @pytest.mark.asyncio
@@ -77,3 +73,37 @@ async def test_writer_arun_uses_prompt_builder():
     assert captured_messages[0]["role"] == "system"
     assert captured_messages[1]["role"] == "user"
     assert "第3章" in captured_messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_writer_arun_includes_summary_history_and_project_brief():
+    """Writer LLM prompt should include chapter summary, history, and project brief."""
+    captured_messages = None
+
+    class FakeGateway:
+        async def chat(self, messages, **kwargs):
+            nonlocal captured_messages
+            captured_messages = messages
+            return "Chapter content"
+
+    agent = WriterAgent(model_name="test-model", system_prompt="You are a writer")
+    agent._gateway = FakeGateway()
+
+    await agent.arun({
+        "chapter_num": 2,
+        "task_card": {"tension_level": 8, "type": "high_conflict"},
+        "chapter_summary": "主角第一次发现师门阴谋",
+        "historical_context": "上一章主角在禁地拿到了残卷。",
+        "project_brief": {
+            "title": "青冥录",
+            "genre": "xuanhuan",
+            "summary": "少年误入仙门，在阴谋中成长。",
+            "target_chapters": 12,
+        },
+    })
+
+    user_content = captured_messages[1]["content"]
+    assert "主角第一次发现师门阴谋" in user_content
+    assert "上一章主角在禁地拿到了残卷。" in user_content
+    assert "青冥录" in user_content
+    assert "少年误入仙门，在阴谋中成长。" in user_content

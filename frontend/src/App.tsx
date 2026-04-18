@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { AppContext, loadStoredCurrentBook, saveCurrentBook, useAppContext, type BookInfo } from "./app-context";
+import { AppContext, normalizeBookInfo, saveCurrentBook, useAppContext, type BookInfo } from "./app-context";
 import { api } from "./api/client";
 import { Projects } from "./pages/Projects";
 import { Outline } from "./pages/Outline";
@@ -126,9 +126,8 @@ function BookGuard({ children }: { children: ReactNode }) {
 }
 
 function App() {
-  const [initialBook] = useState<BookInfo | null>(() => loadStoredCurrentBook());
-  const [currentBook, setCurrentBookState] = useState<BookInfo | null>(initialBook);
-  const [isRestoringBook, setIsRestoringBook] = useState(Boolean(initialBook));
+  const [currentBook, setCurrentBookState] = useState<BookInfo | null>(null);
+  const [isRestoringBook, setIsRestoringBook] = useState(true);
 
   const setCurrentBook = useCallback((book: BookInfo | null) => {
     setCurrentBookState(book);
@@ -139,17 +138,11 @@ function App() {
     let cancelled = false;
 
     const restoreProjectContext = async () => {
-      if (!initialBook) {
-        setIsRestoringBook(false);
-        return;
-      }
-
       try {
-        const res = await api.getProject(initialBook.id);
-        const project = res.data.project as BookInfo;
-        await api.activateProject(project.id);
+        const res = await api.getActiveProject();
+        const project = res.data.project ? normalizeBookInfo(res.data.project) : null;
         if (!cancelled) {
-          setCurrentBook({ id: project.id, title: project.title, genre: project.genre });
+          setCurrentBook(project);
         }
       } catch {
         if (!cancelled) {
@@ -167,7 +160,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [initialBook, setCurrentBook]);
+  }, [setCurrentBook]);
 
   return (
     <AppContext.Provider value={{ currentBook, setCurrentBook, isRestoringBook }}>

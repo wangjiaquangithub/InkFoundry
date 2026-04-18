@@ -1,20 +1,10 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAppContext } from "../app-context";
-import { api } from "../api/client";
+import { normalizeBookInfo, useAppContext } from "../app-context";
+import { api, type ProjectRecord } from "../api/client";
 import { Button } from "../components/ui/button";
 
-interface Project {
-  id: string;
-  title: string;
-  genre: string;
-  created_at: string;
-  last_modified: string;
-  db_path: string;
-  status: string;
-  total_chapters?: number;
-  latest_chapter?: number;
-}
+type Project = ProjectRecord;
 
 const GENRE_MAP: Record<string, string> = {
   xuanhuan: "玄幻",
@@ -34,7 +24,10 @@ export function Projects() {
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newGenre, setNewGenre] = useState("xuanhuan");
+  const [newSummary, setNewSummary] = useState("");
+  const [newTargetChapters, setNewTargetChapters] = useState("12");
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
     void loadProjects();
@@ -56,29 +49,43 @@ export function Projects() {
     }
   };
 
-  const activateProject = async (project: Pick<Project, "id" | "title" | "genre">) => {
+  const activateProject = async (project: Project) => {
     if (isRestoringBook) {
       return;
     }
 
     await api.activateProject(project.id);
-    setCurrentBook({ id: project.id, title: project.title, genre: project.genre });
+    setCurrentBook(normalizeBookInfo(project));
   };
 
   const handleCreate = async () => {
     if (!newTitle.trim()) return;
+    const targetChapters = Number.parseInt(newTargetChapters, 10);
+    if (!Number.isFinite(targetChapters) || targetChapters < 1 || targetChapters > 1000) {
+      setCreateError("目标章数必须在 1 到 1000 之间");
+      return;
+    }
+
     setCreating(true);
+    setCreateError(null);
     try {
-      const createRes = await api.createProject({ title: newTitle, genre: newGenre });
-      const project = createRes.data.project as Pick<Project, "id" | "title" | "genre">;
+      const createRes = await api.createProject({
+        title: newTitle.trim(),
+        genre: newGenre,
+        summary: newSummary.trim(),
+        target_chapters: targetChapters,
+      });
+      const project = createRes.data.project;
       await activateProject(project);
       setShowCreate(false);
       setNewTitle("");
       setNewGenre("xuanhuan");
+      setNewSummary("");
+      setNewTargetChapters("12");
       navigate("/outline");
     } catch (e: unknown) {
       console.error("Failed to create project:", e);
-      alert("创建失败，请重试");
+      setCreateError(e instanceof Error ? e.message : "创建失败，请重试");
     } finally {
       setCreating(false);
     }
@@ -143,11 +150,17 @@ export function Projects() {
               className="bg-white rounded-xl border p-5 hover:shadow-md transition"
             >
               <h3 className="font-semibold text-lg mb-1">{p.title}</h3>
-              <p className="text-xs text-gray-400 mb-3">
+              <p className="text-xs text-gray-400 mb-2">
                 {GENRE_MAP[p.genre] || p.genre}
-                {p.total_chapters ? ` · ${p.total_chapters}章` : ""}
+                {p.target_chapters ? ` · 目标 ${p.target_chapters}章` : ""}
+                {p.total_chapters ? ` · 已写 ${p.total_chapters}章` : ""}
                 {p.latest_chapter ? ` · 最新: 第${p.latest_chapter}章` : ""}
               </p>
+              {p.summary ? (
+                <p className="text-sm text-gray-600 mb-3 line-clamp-3">{p.summary}</p>
+              ) : (
+                <p className="text-sm text-amber-600 mb-3">未填写故事简介，核心创作链路会退化。</p>
+              )}
               <div className="flex gap-2">
                 <Button
                   size="sm"
@@ -174,8 +187,13 @@ export function Projects() {
       {/* Create Modal */}
       {showCreate && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-lg w-full mx-4">
             <h3 className="text-lg font-bold mb-4">创建新项目</h3>
+            {createError && (
+              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {createError}
+              </div>
+            )}
             <div className="space-y-4 mb-4">
               <div>
                 <label className="block text-sm font-medium mb-1">小说标题</label>
@@ -203,12 +221,32 @@ export function Projects() {
                   <option value="mystery">悬疑</option>
                 </select>
               </div>
+              <div>
+                <label className="block text-sm font-medium mb-1">故事简介</label>
+                <textarea
+                  value={newSummary}
+                  onChange={(e) => setNewSummary(e.target.value)}
+                  className="w-full border rounded-lg px-3 py-2 min-h-28"
+                  placeholder="主角是谁、要解决什么问题、整体故事想写成什么样。"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1">目标章数</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={newTargetChapters}
+                  onChange={(e) => setNewTargetChapters(e.target.value)}
+                  className="w-full border rounded-lg px-3 py-2"
+                />
+              </div>
             </div>
             <div className="flex gap-2">
-              <Button className="flex-1" onClick={handleCreate} disabled={creating || !newTitle.trim()}>
+              <Button className="flex-1" onClick={handleCreate} disabled={creating || !newTitle.trim() || !newSummary.trim()}>
                 {creating ? "创建中..." : "创建"}
               </Button>
-              <Button variant="outline" onClick={() => { setShowCreate(false); setNewTitle(""); }}>
+              <Button variant="outline" onClick={() => { setShowCreate(false); setNewTitle(""); setNewGenre("xuanhuan"); setNewSummary(""); setNewTargetChapters("12"); setCreateError(null); }}>
                 取消
               </Button>
             </div>

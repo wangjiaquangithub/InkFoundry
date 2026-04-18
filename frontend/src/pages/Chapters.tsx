@@ -1,19 +1,44 @@
 import { useState, useEffect } from "react";
+import axios from "axios";
 import { api } from "../api/client";
 import { Button } from "../components/ui/button";
-import type { Chapter } from "../types";
+import { useAppContext } from "../app-context";
+import { getCoreChainReadiness } from "../lib/core-chain-readiness";
+import type { Chapter, Outline } from "../types";
+
+const getErrorMessage = (error: unknown) => {
+  if (axios.isAxiosError(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === "string") {
+      return detail;
+    }
+    const errorField = error.response?.data?.error;
+    if (typeof errorField === "string") {
+      return errorField;
+    }
+    return error.message;
+  }
+  return error instanceof Error ? error.message : "未知错误";
+};
 
 export function Chapters() {
+  const { currentBook } = useAppContext();
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Chapter | null>(null);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [outline, setOutline] = useState<Outline | null>(null);
+  const [statusMode, setStatusMode] = useState<"model" | "fallback" | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [loadingReadiness, setLoadingReadiness] = useState(true);
 
   useEffect(() => {
-    loadChapters();
-  }, []);
+    void loadChapters();
+    void loadReadiness();
+  }, [currentBook?.id]);
 
   const loadChapters = async () => {
     setLoading(true);
@@ -25,6 +50,28 @@ export function Chapters() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const loadReadiness = async () => {
+    setLoadingReadiness(true);
+    const [outlineRes, configRes] = await Promise.allSettled([api.getOutline(), api.getConfig()]);
+
+    if (outlineRes.status === "fulfilled") {
+      setOutline(outlineRes.value.data.outline);
+    } else {
+      setOutline(null);
+    }
+
+    if (configRes.status === "fulfilled") {
+      const hasModel = Boolean(configRes.value.data.llm_api_key_masked || configRes.value.data.llm_api_key);
+      setStatusMode(hasModel ? "model" : "fallback");
+      setStatusError(null);
+    } else {
+      setStatusMode(null);
+      setStatusError(getErrorMessage(configRes.reason));
+    }
+
+    setLoadingReadiness(false);
   };
 
   const handleSelect = async (num: number) => {
@@ -66,13 +113,21 @@ export function Chapters() {
     const nextNum = chapters.length > 0
       ? Math.max(...chapters.map((c) => c.chapter_num)) + 1
       : 1;
+
+    if (!chainReadiness.canGenerateChapter) {
+      setPageError(chainReadiness.description);
+      return;
+    }
+
     setGenerating(true);
+    setPageError(null);
     try {
       await api.runChapter(nextNum);
-      loadChapters();
+      await loadChapters();
+      await loadReadiness();
     } catch (e: unknown) {
       console.error("Failed to generate chapter:", e);
-      alert("生成失败: " + ((e instanceof Error ? e.message : "未知错误")));
+      setPageError(getErrorMessage(e));
     } finally {
       setGenerating(false);
     }
@@ -120,8 +175,22 @@ export function Chapters() {
     return <div className="flex items-center justify-center h-full"><p className="text-gray-400">加载章节中...</p></div>;
   }
 
+  const nextChapterNum = chapters.length > 0 ? Math.max(...chapters.map((c) => c.chapter_num)) + 1 : 1;
+  const outlineSummary = outline?.chapter_summaries?.find((ch) => ch.chapter_num === nextChapterNum)?.summary ?? "";
+  const chainReadiness = getCoreChainReadiness({
+    hasProjectSummary: Boolean(currentBook?.summary.trim()),
+    hasOutline: Boolean(outline),
+    hasRealModel: statusMode === null ? null : statusMode === "model",
+  });
+  const canGenerate = chainReadiness.canGenerateChapter && !generating;
+
   return (
     <div className="flex h-full">
+      {pageError && (
+        <div className="absolute left-1/2 top-4 z-10 w-[min(720px,calc(100%-2rem))] -translate-x-1/2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {pageError}
+        </div>
+      )}
       {/* Chapter List */}
       <aside className="w-72 border-r bg-white overflow-y-auto flex flex-col">
         <div className="p-3 border-b flex justify-between items-center">
@@ -167,9 +236,21 @@ export function Chapters() {
       <main className="flex-1 overflow-hidden flex flex-col">
         {/* Toolbar */}
         <div className="flex items-center justify-between px-4 py-2 border-b bg-white">
-          <span className="text-sm text-gray-500">
-            {selected ? `第${selected.chapter_num}章 · ${selected.title || ""}` : "选择左侧章节"}
-          </span>
+          <div>
+            <span className="text-sm text-gray-500">
+              {selected ? `第${selected.chapter_num}章 · ${selected.title || ""}` : "选择左侧章节"}
+            </span>
+            <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-500">
+              <span className={`rounded-full px-2.5 py-1 ${chainReadiness.badgeClassName}`}>
+                链路状态：{chainReadiness.label}
+              </span>
+              <span>模式：{loadingReadiness ? "检查中" : statusMode === "model" ? "真实模型" : statusMode === "fallback" ? "未配置模型" : "状态待确认"}</span>
+              <span>大纲：{outline ? `已加载（目标 ${outline.total_chapters} 章）` : "缺失"}</span>
+              <span>下一步：{chainReadiness.nextAction}</span>
+              {outlineSummary ? <span>下一章概要：{outlineSummary}</span> : null}
+              {statusError ? <span className="text-red-600">状态检查失败：{statusError}</span> : null}
+            </div>
+          </div>
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
@@ -182,7 +263,8 @@ export function Chapters() {
             <Button
               size="sm"
               onClick={handleGenerate}
-              disabled={generating}
+              disabled={!canGenerate}
+              title={!canGenerate ? chainReadiness.nextAction : undefined}
             >
               {generating ? "生成中..." : "生成下一章"}
             </Button>
@@ -235,8 +317,19 @@ export function Chapters() {
               <div className="text-center">
                 <div className="text-6xl mb-4">✍️</div>
                 <h2 className="text-2xl font-bold mb-2">开始创作</h2>
-                <p className="text-gray-500 mb-4">生成大纲后，AI 将自动写章节</p>
-                <Button size="lg" onClick={handleGenerate} disabled={generating}>
+                <p className="text-gray-500 mb-2">先有大纲，再在真实模型模式下生成章节。</p>
+                <div className="mb-2 flex items-center justify-center">
+                  <span className={`rounded-full px-2.5 py-1 text-xs ${chainReadiness.badgeClassName}`}>
+                    {chainReadiness.label}
+                  </span>
+                </div>
+                <p className="text-sm text-gray-400 mb-2">{chainReadiness.description}</p>
+                <p className="text-sm text-gray-400 mb-4">
+                  {outlineSummary && chainReadiness.canGenerateChapter
+                    ? `下一章将基于概要：${outlineSummary}`
+                    : `下一步：${chainReadiness.nextAction}`}
+                </p>
+                <Button size="lg" onClick={handleGenerate} disabled={!canGenerate}>
                   {generating ? "生成中..." : "生成第一章"}
                 </Button>
               </div>

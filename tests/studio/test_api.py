@@ -1,5 +1,7 @@
 """Tests for Studio FastAPI endpoints."""
+import logging
 import os
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +10,9 @@ import Studio.api as studio_api
 from Engine.core.models import CharacterState, StateSnapshot, WorldState
 from Engine.core.state_db import StateDB
 from Studio.api import create_app
+
+
+ACTIVE_PROJECT_COOKIE = "inkfoundry_active_project_id"
 
 
 @pytest.fixture
@@ -34,11 +39,30 @@ def client_with_seed(tmp_path):
         yield c
 
 
+@pytest.fixture
+def pipeline_manager(client):
+    return client.app.state.pipeline_manager
+
+
 def test_status_endpoint(client):
     response = client.get("/status")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "idle"
+
+
+def test_status_endpoint_survives_malformed_stored_config(client):
+    client.app.state.db.conn.execute(
+        "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
+        ("config", '{"llm_api_key": "broken"'),
+    )
+    client.app.state.db.conn.commit()
+
+    response = client.get("/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["title"] == "Untitled Novel"
 
 
 def test_health_endpoint(client):
@@ -56,7 +80,6 @@ def test_get_characters_empty(client):
 
 
 def test_create_and_get_character(client):
-    # Create a character
     response = client.post("/characters", json={
         "name": "Hero",
         "role": "Protagonist",
@@ -64,7 +87,6 @@ def test_create_and_get_character(client):
     })
     assert response.status_code == 200
 
-    # Verify it exists
     response = client.get("/characters")
     data = response.json()
     assert len(data["characters"]) == 1
@@ -123,8 +145,30 @@ def test_generate_outline(client):
     assert len(data["outline"]["chapter_summaries"]) == 10
 
 
+def test_generate_outline_uses_stored_project_brief(client):
+    project = client.post("/api/projects", json={
+        "title": "Stored Brief Novel",
+        "genre": "xuanhuan",
+        "summary": "少年误入仙门，在阴谋中成长。",
+        "target_chapters": 6,
+    }).json()["project"]
+    activate_response = client.post(f"/api/projects/{project['id']}/activate")
+    assert activate_response.status_code == 200
+
+    response = client.post("/api/outlines/generate", json={})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["outline"]["title"] == "Stored Brief Novel"
+    assert data["outline"]["summary"] == "少年误入仙门，在阴谋中成长。"
+    assert data["outline"]["total_chapters"] == 6
+
+
 def test_get_outline(client):
-    client.post("/api/outlines/generate", json={"title": "Test", "total_chapters": 5})
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 5,
+    })
     response = client.get("/api/outlines")
     data = response.json()
     assert data["outline"] is not None
@@ -190,18 +234,476 @@ def test_create_and_get_world_building(client):
 
 # --- Pipeline API tests ---
 
-def test_run_chapter_via_api(client):
-    # Need an outline first
-    client.post("/api/outlines/generate", json={"title": "Test", "total_chapters": 10})
+def test_run_chapter_via_api(client, pipeline_manager, monkeypatch):
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 10,
+    })
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.openai.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
+    class FakeOrchestrator:
+        async def run_chapter(self, chapter_num: int):
+            return {"chapter_num": chapter_num, "status": "reviewed"}
+
+        def _has_api_key(self):
+            return True
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: FakeOrchestrator(),
+    )
+
     response = client.post("/api/pipeline/run-chapter/1")
     assert response.status_code == 200
     data = response.json()
     assert data["chapter_num"] == 1
-    assert "status" in data
+    assert data["status"] == "reviewed"
+    assert data["mode"] == "model"
+
+
+def test_run_chapter_via_api_requires_real_model(client):
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 10,
+    })
+    response = client.post("/api/pipeline/run-chapter/1")
+    assert response.status_code == 422
+    assert "real llm configuration" in response.json()["detail"].lower()
+
+
+def test_create_project_requires_summary(client):
+    response = client.post("/api/projects", json={
+        "title": "No Summary Project",
+        "genre": "xuanhuan",
+        "summary": "   ",
+        "target_chapters": 12,
+    })
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Project summary is required"
+
+
+def test_get_active_project_returns_null_when_no_project_is_active(client):
+    response = client.get("/api/projects/active")
+
+    assert response.status_code == 200
+    assert response.json() == {"project": None}
+
+
+def test_activate_project_sets_active_project_cookie(client):
+    project = client.post("/api/projects", json={
+        "title": "Project A",
+        "genre": "fantasy",
+        "summary": "Project A summary",
+    }).json()["project"]
+
+    response = client.post(f"/api/projects/{project['id']}/activate")
+
+    assert response.status_code == 200
+    assert response.cookies.get(ACTIVE_PROJECT_COOKIE) == project["id"]
+    assert client.cookies.get(ACTIVE_PROJECT_COOKIE) == project["id"]
+    set_cookie = response.headers["set-cookie"]
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=lax" in set_cookie
+    assert "Path=/" in set_cookie
+
+
+def test_activate_project_cookie_is_not_secure_on_http_client(client):
+    project = client.post("/api/projects", json={
+        "title": "Project A",
+        "genre": "fantasy",
+        "summary": "Project A summary",
+    }).json()["project"]
+
+    response = client.post(f"/api/projects/{project['id']}/activate")
+
+    assert response.status_code == 200
+    assert "Secure" not in response.headers["set-cookie"]
+
+
+def test_activate_project_cookie_ignores_forwarded_proto_on_http_client(client):
+    project = client.post("/api/projects", json={
+        "title": "Project A",
+        "genre": "fantasy",
+        "summary": "Project A summary",
+    }).json()["project"]
+
+    response = client.post(
+        f"/api/projects/{project['id']}/activate",
+        headers={"x-forwarded-proto": "https"},
+    )
+
+    assert response.status_code == 200
+    assert "Secure" not in response.headers["set-cookie"]
+
+
+def test_activate_project_cookie_is_secure_on_https_client(tmp_path):
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
+    with TestClient(app, base_url="https://testserver") as client:
+        project = client.post("/api/projects", json={
+            "title": "Project A",
+            "genre": "fantasy",
+            "summary": "Project A summary",
+        }).json()["project"]
+
+        response = client.post(f"/api/projects/{project['id']}/activate")
+
+        assert response.status_code == 200
+        assert "Secure" in response.headers["set-cookie"]
+
+
+def test_deleted_active_project_clears_secure_cookie_on_https_client(tmp_path):
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
+    with TestClient(app, base_url="https://testserver") as client:
+        project = client.post("/api/projects", json={
+            "title": "Project A",
+            "genre": "fantasy",
+            "summary": "Project A summary",
+        }).json()["project"]
+
+        assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+        client.app.state.project_manager.delete_project(project["id"])
+
+        response = client.get("/api/chapters")
+
+        assert response.status_code == 409
+        assert "Secure" in response.headers["set-cookie"]
+        assert client.cookies.get(ACTIVE_PROJECT_COOKIE) is None
+
+
+def test_get_active_project_persists_within_same_client_session(client):
+    project = client.post("/api/projects", json={
+        "title": "Project A",
+        "genre": "fantasy",
+        "summary": "Project A summary",
+    }).json()["project"]
+
+    assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+
+    response = client.get("/api/projects/active")
+
+    assert response.status_code == 200
+    active_project = response.json()["project"]
+    assert active_project is not None
+    assert active_project["id"] == project["id"]
+    assert active_project["title"] == "Project A"
+    assert active_project["summary"] == "Project A summary"
+    assert "db_path" not in active_project
+
+
+def test_project_activation_is_isolated_between_two_test_clients(tmp_path):
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        project_a = client_a.post("/api/projects", json={
+            "title": "Project A",
+            "genre": "fantasy",
+            "summary": "Project A summary",
+        }).json()["project"]
+        project_b = client_b.post("/api/projects", json={
+            "title": "Project B",
+            "genre": "sci-fi",
+            "summary": "Project B summary",
+        }).json()["project"]
+
+        assert client_a.post(f"/api/projects/{project_a['id']}/activate").status_code == 200
+        assert client_b.post(f"/api/projects/{project_b['id']}/activate").status_code == 200
+
+        active_a = client_a.get("/api/projects/active")
+        active_b = client_b.get("/api/projects/active")
+
+        assert active_a.status_code == 200
+        assert active_b.status_code == 200
+        assert active_a.json()["project"]["id"] == project_a["id"]
+        assert active_b.json()["project"]["id"] == project_b["id"]
+
+
+def test_activate_project_does_not_stop_running_pipeline_in_other_session(tmp_path):
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        project_a = client_a.post("/api/projects", json={
+            "title": "Project A",
+            "genre": "fantasy",
+            "summary": "Project A summary",
+        }).json()["project"]
+        project_b = client_b.post("/api/projects", json={
+            "title": "Project B",
+            "genre": "sci-fi",
+            "summary": "Project B summary",
+        }).json()["project"]
+
+        assert client_a.post(f"/api/projects/{project_a['id']}/activate").status_code == 200
+        response = client_b.post(f"/api/projects/{project_b['id']}/activate")
+
+        assert response.status_code == 200
+
+
+def test_project_scoped_chapters_are_isolated_between_two_test_clients(tmp_path):
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        project_a = client_a.post("/api/projects", json={
+            "title": "Project A",
+            "genre": "fantasy",
+            "summary": "Project A summary",
+        }).json()["project"]
+        project_b = client_b.post("/api/projects", json={
+            "title": "Project B",
+            "genre": "sci-fi",
+            "summary": "Project B summary",
+        }).json()["project"]
+
+        assert client_a.post(f"/api/projects/{project_a['id']}/activate").status_code == 200
+        assert client_b.post(f"/api/projects/{project_b['id']}/activate").status_code == 200
+        assert client_a.post("/api/chapters", json={"title": "A1", "content": "project a data"}).status_code == 200
+
+        chapters_a = client_a.get("/api/chapters")
+        chapters_b = client_b.get("/api/chapters")
+
+        assert chapters_a.status_code == 200
+        assert chapters_b.status_code == 200
+        assert len(chapters_a.json()["chapters"]) == 1
+        assert chapters_a.json()["chapters"][0]["title"] == "A1"
+        assert chapters_b.json()["chapters"] == []
+
+
+def test_get_active_project_clears_stale_deleted_project_cookie(client):
+    project = client.post("/api/projects", json={
+        "title": "Deleted Project",
+        "genre": "fantasy",
+        "summary": "Deleted Project summary",
+    }).json()["project"]
+
+    assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+    client.app.state.project_manager.delete_project(project["id"])
+
+    response = client.get("/api/projects/active")
+
+    assert response.status_code == 200
+    assert response.json() == {"project": None}
+    assert client.cookies.get(ACTIVE_PROJECT_COOKIE) is None
+
+
+def test_deleted_active_project_is_rejected_by_project_scoped_routes(client):
+    project = client.post("/api/projects", json={
+        "title": "Project A",
+        "genre": "fantasy",
+        "summary": "Project A summary",
+    }).json()["project"]
+
+    assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+    client.app.state.project_manager.delete_project(project["id"])
+
+    chapters_response = client.get("/api/chapters")
+
+    assert chapters_response.status_code == 409
+    assert chapters_response.json()["detail"] == "Active project is no longer available; please reselect a project"
+    assert chapters_response.headers["set-cookie"].startswith(f"{ACTIVE_PROJECT_COOKIE}=")
+    assert client.cookies.get(ACTIVE_PROJECT_COOKIE) is None
+
+
+def test_delete_active_project_clears_session_selection_and_rejects_followup_project_routes(client):
+    project = client.post("/api/projects", json={
+        "title": "Project A",
+        "genre": "fantasy",
+        "summary": "Project A summary",
+    }).json()["project"]
+
+    assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+    assert client.post("/api/chapters", json={"title": "Only Chapter", "content": "project data"}).status_code == 200
+
+    delete_response = client.delete(f"/api/projects/{project['id']}")
+    active_response = client.get("/api/projects/active")
+    chapters_response = client.get("/api/chapters")
+
+    assert delete_response.status_code == 200
+    assert client.cookies.get(ACTIVE_PROJECT_COOKIE) is None
+    assert active_response.status_code == 200
+    assert active_response.json() == {"project": None}
+    assert chapters_response.status_code == 200
+    assert chapters_response.json()["chapters"] == []
+
+
+def test_run_chapter_via_api_returns_validation_error_when_outline_missing(client):
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.openai.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+    response = client.post("/api/pipeline/run-chapter/1")
+    assert response.status_code == 400
+    assert "outline" in response.json()["detail"].lower()
+
+
+def test_run_chapter_via_api_returns_validation_error_when_out_of_range(client, pipeline_manager, monkeypatch):
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 1,
+    })
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.openai.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
+    class FakeOrchestrator:
+        async def run_chapter(self, chapter_num: int):
+            raise ValueError("chapter 2 is out of range for outline with 1 chapters")
+
+        def _has_api_key(self):
+            return True
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: FakeOrchestrator(),
+    )
+
+    response = client.post("/api/pipeline/run-chapter/2")
+    assert response.status_code == 400
+    assert "out of range" in response.json()["detail"].lower()
+
+
+def test_run_chapter_via_api_hides_internal_error_details(client, pipeline_manager, monkeypatch):
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 1,
+    })
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.openai.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
+    class FakeOrchestrator:
+        async def run_chapter(self, chapter_num: int):
+            raise RuntimeError("upstream provider timeout: api-key=secret")
+
+        def _has_api_key(self):
+            return True
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: FakeOrchestrator(),
+    )
+
+    response = client.post("/api/pipeline/run-chapter/1")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Chapter generation failed"
+
+
+
+def test_run_chapter_via_api_hides_internal_error_details_in_logs(client, pipeline_manager, monkeypatch, caplog):
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 1,
+    })
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.openai.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
+    class FakeOrchestrator:
+        async def run_chapter(self, chapter_num: int):
+            raise RuntimeError("upstream provider timeout: api-key=secret")
+
+        def _has_api_key(self):
+            return True
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: FakeOrchestrator(),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post("/api/pipeline/run-chapter/1")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Chapter generation failed"
+    assert "api-key=secret" not in caplog.text
+
+
+
+def test_run_chapter_via_api_releases_sync_lock_when_orchestrator_creation_fails(client, pipeline_manager, monkeypatch):
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 2,
+    })
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.openai.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
+    calls = {"count": 0}
+
+    class SuccessOrchestrator:
+        async def run_chapter(self, chapter_num: int):
+            return {"chapter_num": chapter_num, "status": "reviewed"}
+
+        def _has_api_key(self):
+            return True
+
+    def fake_create_orchestrator(db):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise studio_api.HTTPException(status_code=422, detail="Invalid stored config")
+        return SuccessOrchestrator()
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        fake_create_orchestrator,
+    )
+
+    first_response = client.post("/api/pipeline/run-chapter/1")
+    second_response = client.post("/api/pipeline/run-chapter/2")
+
+    assert first_response.status_code == 422
+    assert first_response.json()["detail"] == "Invalid stored config"
+    assert second_response.status_code == 200
+    assert second_response.json()["chapter_num"] == 2
+    assert second_response.json()["status"] == "reviewed"
+    assert second_response.json()["mode"] == "model"
 
 
 def test_run_batch_via_api(client):
-    client.post("/api/outlines/generate", json={"title": "Test", "total_chapters": 10})
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 10,
+    })
     response = client.post("/api/pipeline/run-batch", json={
         "start_chapter": 1,
         "end_chapter": 3,
@@ -211,6 +713,308 @@ def test_run_batch_via_api(client):
     assert "1" in data["results"]
     assert "2" in data["results"]
     assert "3" in data["results"]
+
+
+def test_run_batch_via_api_returns_conflict_when_pipeline_is_busy(client, pipeline_manager):
+    class FakeTask:
+        def done(self):
+            return False
+
+    class FakeOrchestrator:
+        status = {"running": True, "paused": False}
+
+    runtime = pipeline_manager._runtime_for_db(client.app.state.db)
+    runtime.task = FakeTask()
+    runtime.orchestrator = FakeOrchestrator()
+
+    response = client.post("/api/pipeline/run-batch", json={
+        "start_chapter": 1,
+        "end_chapter": 3,
+    })
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Pipeline already running"
+
+
+
+def test_run_batch_via_api_returns_validation_error_on_value_error(client, pipeline_manager, monkeypatch):
+    class FakeOrchestrator:
+        async def run_batch(self, start: int, end: int):
+            raise ValueError("start_chapter must be less than or equal to end_chapter")
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: FakeOrchestrator(),
+    )
+
+    response = client.post("/api/pipeline/run-batch", json={
+        "start_chapter": 3,
+        "end_chapter": 1,
+    })
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "start_chapter must be less than or equal to end_chapter"
+
+
+
+def test_run_batch_via_api_propagates_http_exception(client, pipeline_manager, monkeypatch):
+    class FakeOrchestrator:
+        async def run_batch(self, start: int, end: int):
+            raise studio_api.HTTPException(status_code=422, detail="Invalid batch range")
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: FakeOrchestrator(),
+    )
+
+    response = client.post("/api/pipeline/run-batch", json={
+        "start_chapter": 1,
+        "end_chapter": 3,
+    })
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Invalid batch range"
+
+
+
+def test_run_batch_via_api_hides_internal_error_details(client, pipeline_manager, monkeypatch, caplog):
+    class FakeOrchestrator:
+        async def run_batch(self, start: int, end: int):
+            raise RuntimeError("upstream provider timeout: api-key=secret")
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: FakeOrchestrator(),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post("/api/pipeline/run-batch", json={
+            "start_chapter": 1,
+            "end_chapter": 3,
+        })
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Batch generation failed"
+    assert "api-key=secret" not in caplog.text
+
+
+
+def test_run_batch_via_api_rejects_concurrent_sync_request(client, pipeline_manager, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowOrchestrator:
+        async def run_batch(self, start: int, end: int):
+            import asyncio
+
+            entered.set()
+            await asyncio.to_thread(release.wait, 5)
+            return {start: {"status": "reviewed"}}
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        lambda db: SlowOrchestrator(),
+    )
+
+    responses: dict[str, object] = {}
+
+    def first_request() -> None:
+        responses["first"] = client.post("/api/pipeline/run-batch", json={
+            "start_chapter": 1,
+            "end_chapter": 1,
+        })
+
+    worker = threading.Thread(target=first_request)
+    worker.start()
+    assert entered.wait(timeout=5)
+
+    second_response = client.post("/api/pipeline/run-batch", json={
+        "start_chapter": 2,
+        "end_chapter": 2,
+    })
+    release.set()
+    worker.join(timeout=5)
+
+    assert second_response.status_code == 409
+    assert second_response.json()["detail"] == "Pipeline already running"
+    first_response = responses.get("first")
+    assert first_response is not None
+    assert first_response.status_code == 200
+
+
+
+def test_run_batch_via_api_releases_sync_lock_when_orchestrator_creation_fails(client, pipeline_manager, monkeypatch):
+    calls = {"count": 0}
+
+    class SuccessOrchestrator:
+        async def run_batch(self, start: int, end: int):
+            return {start: {"status": "reviewed"}}
+
+    def fake_create_orchestrator(db):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise studio_api.HTTPException(status_code=422, detail="Invalid stored config")
+        return SuccessOrchestrator()
+
+    monkeypatch.setattr(
+        pipeline_manager,
+        "_create_orchestrator",
+        fake_create_orchestrator,
+    )
+
+    first_response = client.post("/api/pipeline/run-batch", json={
+        "start_chapter": 1,
+        "end_chapter": 1,
+    })
+    second_response = client.post("/api/pipeline/run-batch", json={
+        "start_chapter": 2,
+        "end_chapter": 2,
+    })
+
+    assert first_response.status_code == 422
+    assert first_response.json()["detail"] == "Invalid stored config"
+    assert second_response.status_code == 200
+    assert second_response.json()["results"]["2"]["status"] == "reviewed"
+
+
+
+def test_pipeline_manager_start_chapter_rejects_when_sync_lock_is_held(client, monkeypatch):
+    import asyncio
+
+    manager = studio_api.PipelineManager()
+
+    def should_not_create_orchestrator(_db):
+        raise AssertionError("_create_orchestrator should not be called when sync lock is held")
+
+    monkeypatch.setattr(manager, "_create_orchestrator", should_not_create_orchestrator)
+
+    runtime = manager._runtime_for_db(client.app.state.db)
+    assert runtime.sync_run_lock.acquire(blocking=False)
+    try:
+        result = asyncio.run(manager.start_chapter(1, client.app.state.db))
+    finally:
+        if runtime.sync_run_lock.locked():
+            runtime.sync_run_lock.release()
+
+    assert result == {"error": "Pipeline already running", "started": False}
+
+
+
+def test_pipeline_manager_start_batch_rejects_when_sync_lock_is_held(client, monkeypatch):
+    import asyncio
+
+    manager = studio_api.PipelineManager()
+
+    def should_not_create_orchestrator(_db):
+        raise AssertionError("_create_orchestrator should not be called when sync lock is held")
+
+    monkeypatch.setattr(manager, "_create_orchestrator", should_not_create_orchestrator)
+
+    runtime = manager._runtime_for_db(client.app.state.db)
+    assert runtime.sync_run_lock.acquire(blocking=False)
+    try:
+        result = asyncio.run(manager.start_batch(1, 2, client.app.state.db))
+    finally:
+        if runtime.sync_run_lock.locked():
+            runtime.sync_run_lock.release()
+
+    assert result == {"error": "Pipeline already running", "started": False}
+
+
+
+def test_run_chapter_via_api_allows_concurrent_sync_requests_for_different_projects(tmp_path, monkeypatch):
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        pipeline_manager = app.state.pipeline_manager
+        project_a = client_a.post("/api/projects", json={
+            "title": "Project A",
+            "genre": "fantasy",
+            "summary": "Project A summary",
+        }).json()["project"]
+        project_b = client_b.post("/api/projects", json={
+            "title": "Project B",
+            "genre": "sci-fi",
+            "summary": "Project B summary",
+        }).json()["project"]
+
+        for client, project in ((client_a, project_a), (client_b, project_b)):
+            assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+            assert client.post("/api/outlines/generate", json={
+                "title": project["title"],
+                "summary": project["summary"],
+                "total_chapters": 2,
+            }).status_code == 200
+            assert client.post("/api/config", json={
+                "llm_api_key": "test-key",
+                "llm_base_url": "https://api.openai.com/v1",
+                "default_model": "qwen3.6-plus",
+            }).status_code == 200
+
+        entered_a = threading.Event()
+        entered_b = threading.Event()
+        release = threading.Event()
+
+        class SlowOrchestrator:
+            def __init__(self, label: str):
+                self.label = label
+
+            async def run_chapter(self, chapter_num: int):
+                import asyncio
+
+                if self.label == "A":
+                    entered_a.set()
+                else:
+                    entered_b.set()
+                await asyncio.to_thread(release.wait, 5)
+                return {"chapter_num": chapter_num, "status": f"reviewed-{self.label}"}
+
+            def _has_api_key(self):
+                return True
+
+        def fake_create_orchestrator(db):
+            if db.db_path.endswith(f"{project_a['id']}.db"):
+                return SlowOrchestrator("A")
+            if db.db_path.endswith(f"{project_b['id']}.db"):
+                return SlowOrchestrator("B")
+            raise AssertionError(f"Unexpected db path: {db.db_path}")
+
+        monkeypatch.setattr(pipeline_manager, "_create_orchestrator", fake_create_orchestrator)
+
+        responses: dict[str, object] = {}
+
+        def request_a() -> None:
+            responses["a"] = client_a.post("/api/pipeline/run-chapter/1")
+
+        def request_b() -> None:
+            responses["b"] = client_b.post("/api/pipeline/run-chapter/1")
+
+        worker_a = threading.Thread(target=request_a)
+        worker_b = threading.Thread(target=request_b)
+        worker_a.start()
+        assert entered_a.wait(timeout=5)
+        worker_b.start()
+        assert entered_b.wait(timeout=5)
+        release.set()
+        worker_a.join(timeout=5)
+        worker_b.join(timeout=5)
+
+        response_a = responses.get("a")
+        response_b = responses.get("b")
+        assert response_a is not None
+        assert response_b is not None
+        assert response_a.status_code == 200
+        assert response_b.status_code == 200
+        assert response_a.json()["status"] == "reviewed-A"
+        assert response_b.json()["status"] == "reviewed-B"
+
 
 
 def test_pipeline_status_via_api(client):
@@ -225,7 +1029,6 @@ def test_pipeline_status_via_api(client):
 def test_websocket_connection(client):
     """Test that WebSocket endpoint accepts connections."""
     with client.websocket_connect("/ws/pipeline") as ws:
-        # Connection should be accepted
         ws.send_text('{"action": "subscribe"}')
         data = ws.receive_json()
         assert data["type"] == "subscription_confirmed"
@@ -233,16 +1036,15 @@ def test_websocket_connection(client):
 
 def test_websocket_receives_pipeline_events(client):
     """Test that WebSocket pushes pipeline progress events."""
-    # Generate an outline first
-    client.post("/api/outlines/generate", json={"title": "Test", "total_chapters": 5})
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 5,
+    })
 
     with client.websocket_connect("/ws/pipeline") as ws:
         ws.send_text('{"action": "subscribe"}')
-        ws.receive_json()  # subscription_confirmed
-
-        # Trigger a chapter run — the orchestrator should publish events
-        # that get pushed through WebSocket
-        # We verify the WebSocket is functional and accepts messages
+        ws.receive_json()
         ws.send_text('{"action": "ping"}')
         data = ws.receive_json()
         assert data["type"] == "pong"
@@ -302,7 +1104,6 @@ def test_invalid_stored_config_returns_422_for_llm_dependent_endpoint(client):
     assert "incompatible with DashScope" in response.json()["detail"]
 
 
-
 def test_malformed_stored_config_returns_500_for_get_config(client):
     client.app.state.db.conn.execute(
         "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
@@ -316,6 +1117,111 @@ def test_malformed_stored_config_returns_500_for_get_config(client):
     assert "config" in response.json()["detail"].lower()
     assert "json" in response.json()["detail"].lower()
 
+
+def test_api_status_survives_malformed_stored_config(client):
+    client.app.state.db.conn.execute(
+        "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
+        ("config", '{"llm_api_key": "broken"'),
+    )
+    client.app.state.db.conn.commit()
+
+    response = client.get("/api/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["title"] == "Untitled Novel"
+
+
+def test_status_and_api_status_share_same_fallback_for_malformed_project_brief(client):
+    client.app.state.db.conn.execute(
+        "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
+        ("project_brief", '{"title": "Broken Brief"'),
+    )
+    client.app.state.db.conn.commit()
+
+    status_response = client.get("/status")
+    api_status_response = client.get("/api/status")
+
+    assert status_response.status_code == 200
+    assert api_status_response.status_code == 200
+    assert status_response.json() == api_status_response.json()
+    assert api_status_response.json()["status"] == "error"
+
+
+def test_api_status_clamps_current_chapter_when_all_chapters_completed(client):
+    client.post("/api/outlines/generate", json={
+        "title": "Complete Novel",
+        "summary": "A complete story",
+        "total_chapters": 3,
+    })
+    for chapter_num in range(1, 4):
+        client.post("/api/chapters", json={"title": f"Chapter {chapter_num}", "content": "Done"})
+        client.put(f"/api/chapters/{chapter_num}", json={"status": "reviewed"})
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["current_chapter"] == 3
+    assert data["total_chapters"] == 3
+    assert data["status"] == "completed"
+
+
+def test_api_status_reflects_pipeline_runtime_state(client, pipeline_manager):
+    class FakeTask:
+        def done(self):
+            return False
+
+    class FakeOrchestrator:
+        def __init__(self, running: bool, paused: bool):
+            self.status = {"running": running, "paused": paused}
+
+    runtime = pipeline_manager._runtime_for_db(client.app.state.db)
+    runtime.task = FakeTask()
+    runtime.orchestrator = FakeOrchestrator(running=True, paused=False)
+    running_response = client.get("/api/status")
+    assert running_response.status_code == 200
+    assert running_response.json()["status"] == "running"
+
+    runtime.orchestrator = FakeOrchestrator(running=False, paused=True)
+    paused_response = client.get("/api/status")
+    assert paused_response.status_code == 200
+    assert paused_response.json()["status"] == "paused"
+
+
+def test_api_status_is_idle_when_progress_exists_but_pipeline_is_not_running(client):
+    client.post("/api/outlines/generate", json={
+        "title": "Partial Novel",
+        "summary": "A partial story",
+        "total_chapters": 3,
+    })
+    client.post("/api/chapters", json={"title": "Chapter 1", "content": "Done"})
+    client.put("/api/chapters/1", json={"status": "reviewed"})
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "idle"
+    assert data["current_chapter"] == 2
+
+
+def test_api_status_uses_first_incomplete_chapter_not_completed_count(client):
+    client.post("/api/outlines/generate", json={
+        "title": "Sparse Novel",
+        "summary": "A sparse story",
+        "total_chapters": 3,
+    })
+    client.post("/api/chapters", json={"title": "Chapter 1", "content": "Draft"})
+    client.post("/api/chapters", json={"title": "Chapter 2", "content": "Done"})
+    client.put("/api/chapters/2", json={"status": "reviewed"})
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["current_chapter"] == 1
+    assert data["status"] == "idle"
 
 
 def test_malformed_stored_config_returns_500_for_save_config(client):
@@ -332,7 +1238,6 @@ def test_malformed_stored_config_returns_500_for_save_config(client):
     assert "json" in response.json()["detail"].lower()
 
 
-
 def test_non_object_stored_config_returns_500_for_get_config(client):
     client.app.state.db.conn.execute(
         "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
@@ -345,7 +1250,6 @@ def test_non_object_stored_config_returns_500_for_get_config(client):
     assert response.status_code == 500
     assert "config" in response.json()["detail"].lower()
     assert "json object" in response.json()["detail"].lower()
-
 
 
 def test_malformed_stored_config_returns_500_for_llm_dependent_endpoint(client):
@@ -364,7 +1268,6 @@ def test_malformed_stored_config_returns_500_for_llm_dependent_endpoint(client):
     assert response.status_code == 500
     assert "config" in response.json()["detail"].lower()
     assert "json" in response.json()["detail"].lower()
-
 
 
 def test_save_config_does_not_persist_env_api_key_on_partial_update(client, monkeypatch):
@@ -395,11 +1298,14 @@ def test_invalid_stored_config_returns_422_for_pipeline_endpoint(client):
     )
     client.app.state.db.conn.commit()
 
-    client.post("/api/outlines/generate", json={"title": "Test", "total_chapters": 5})
+    client.post("/api/outlines/generate", json={
+        "title": "Test",
+        "summary": "A clear summary",
+        "total_chapters": 5,
+    })
     response = client.post("/api/pipeline/run-chapter/1")
     assert response.status_code == 422
     assert "incompatible with DashScope" in response.json()["detail"]
-
 
 
 def test_save_config_does_not_mutate_process_environment(client, monkeypatch):
@@ -423,7 +1329,6 @@ def test_save_config_does_not_mutate_process_environment(client, monkeypatch):
     assert config["llm_api_key_masked"] == "****-key"
     assert config["llm_base_url"] == "https://db.example/v1"
     assert config["default_model"] == "db-model"
-
 
 
 def test_delete_config_clears_db_overrides_and_falls_back_to_environment_defaults(client, monkeypatch):
@@ -452,10 +1357,9 @@ def test_delete_config_clears_db_overrides_and_falls_back_to_environment_default
     assert config["default_model"] == "env-model"
 
 
-
 def test_config_save_is_project_scoped_between_activated_projects(client):
-    project_a = client.post("/api/projects", json={"title": "Project A", "genre": "fantasy"}).json()["project"]
-    project_b = client.post("/api/projects", json={"title": "Project B", "genre": "sci-fi"}).json()["project"]
+    project_a = client.post("/api/projects", json={"title": "Project A", "genre": "fantasy", "summary": "Project A summary"}).json()["project"]
+    project_b = client.post("/api/projects", json={"title": "Project B", "genre": "sci-fi", "summary": "Project B summary"}).json()["project"]
 
     activate_a = client.post(f"/api/projects/{project_a['id']}/activate")
     assert activate_a.status_code == 200
@@ -478,10 +1382,9 @@ def test_config_save_is_project_scoped_between_activated_projects(client):
     assert config_a["writer_model"] == "writer-a"
 
 
-
 def test_delete_config_only_resets_active_project_config(client):
-    project_a = client.post("/api/projects", json={"title": "Project A", "genre": "fantasy"}).json()["project"]
-    project_b = client.post("/api/projects", json={"title": "Project B", "genre": "sci-fi"}).json()["project"]
+    project_a = client.post("/api/projects", json={"title": "Project A", "genre": "fantasy", "summary": "Project A summary"}).json()["project"]
+    project_b = client.post("/api/projects", json={"title": "Project B", "genre": "sci-fi", "summary": "Project B summary"}).json()["project"]
 
     assert client.post(f"/api/projects/{project_a['id']}/activate").status_code == 200
     assert client.post("/api/config", json={"default_model": "model-a"}).status_code == 200
@@ -504,7 +1407,6 @@ def test_list_snapshots_empty(client):
 
     assert response.status_code == 200
     assert response.json() == {"snapshots": []}
-
 
 
 def test_save_snapshot_persists_current_state(client):
@@ -531,7 +1433,6 @@ def test_save_snapshot_persists_current_state(client):
     assert snapshots[0]["chapter_num"] == 1
 
 
-
 def test_save_snapshot_increments_version(client):
     first = client.post("/api/snapshots")
     second = client.post("/api/snapshots")
@@ -542,7 +1443,6 @@ def test_save_snapshot_increments_version(client):
     assert first.json()["version"] == 1
     assert second.json()["version"] == 2
     assert [snapshot["version"] for snapshot in list_response.json()["snapshots"]] == [1, 2]
-
 
 
 def test_restore_snapshot_restores_saved_state(client):
@@ -579,13 +1479,11 @@ def test_restore_snapshot_restores_saved_state(client):
     assert restored_world.state == "stable"
 
 
-
 def test_restore_snapshot_not_found(client):
     response = client.post("/api/snapshots/999/restore")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Snapshot v999 not found"
-
 
 
 def test_delete_snapshot_removes_snapshot_from_list(client):
@@ -599,13 +1497,11 @@ def test_delete_snapshot_removes_snapshot_from_list(client):
     assert list_response.json() == {"snapshots": []}
 
 
-
 def test_delete_snapshot_not_found(client):
     response = client.delete("/api/snapshots/999")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Snapshot v999 not found"
-
 
 
 def test_restore_snapshot_rejects_legacy_snapshot_without_chapters(client):
@@ -627,75 +1523,62 @@ def test_restore_snapshot_rejects_legacy_snapshot_without_chapters(client):
     )
 
 
+def test_pipeline_status_is_isolated_between_two_project_sessions(tmp_path):
+    app = create_app(
+        seed_data=False,
+        db_path=":memory:",
+        projects_dir=str(tmp_path / "projects"),
+    )
+    with TestClient(app) as client_a, TestClient(app) as client_b:
+        pipeline_manager = app.state.pipeline_manager
+        project_a = client_a.post("/api/projects", json={"title": "Project A", "genre": "fantasy", "summary": "Project A summary"}).json()["project"]
+        project_b = client_b.post("/api/projects", json={"title": "Project B", "genre": "sci-fi", "summary": "Project B summary"}).json()["project"]
+        project_a_info = app.state.project_manager.get_project(project_a["id"])
+        project_b_info = app.state.project_manager.get_project(project_b["id"])
+        assert project_a_info is not None
+        assert project_b_info is not None
 
-def test_activate_project_rebinds_token_tracker_to_new_project_db(client):
-    project_a = client.post("/api/projects", json={"title": "Project A", "genre": "fantasy"}).json()["project"]
-    project_b = client.post("/api/projects", json={"title": "Project B", "genre": "sci-fi"}).json()["project"]
+        assert client_a.post(f"/api/projects/{project_a['id']}/activate").status_code == 200
 
-    assert client.post(f"/api/projects/{project_a['id']}/activate").status_code == 200
-    studio_api._get_token_tracker().record("model-a", 10, 5, "project-a-task")
+        class FakeTask:
+            def done(self):
+                return False
 
-    project_a_db = StateDB(project_a["db_path"])
-    try:
-        project_a_tokens = project_a_db.get_state("token_records")
-        assert project_a_tokens is not None
-        assert len(project_a_tokens["records"]) == 1
-        assert project_a_tokens["records"][0]["task"] == "project-a-task"
-    finally:
-        project_a_db.close()
+            def cancel(self):
+                return None
 
-    assert client.post(f"/api/projects/{project_b['id']}/activate").status_code == 200
-    studio_api._get_token_tracker().record("model-b", 7, 3, "project-b-task")
+        class FakeOrchestrator:
+            def __init__(self):
+                self.status = {"running": True, "paused": True}
 
-    project_a_db = StateDB(project_a["db_path"])
-    project_b_db = StateDB(project_b["db_path"])
-    try:
-        project_a_tokens = project_a_db.get_state("token_records")
-        project_b_tokens = project_b_db.get_state("token_records")
-        assert project_a_tokens is not None
-        assert len(project_a_tokens["records"]) == 1
-        assert project_b_tokens is not None
-        assert len(project_b_tokens["records"]) == 1
-        assert project_b_tokens["records"][0]["task"] == "project-b-task"
-    finally:
-        project_a_db.close()
-        project_b_db.close()
+            def stop(self):
+                self.status = {"running": False, "paused": False}
 
+        project_a_db = StateDB(project_a_info.db_path)
+        try:
+            runtime = pipeline_manager._runtime_for_db(project_a_db)
+            runtime.task = FakeTask()
+            runtime.orchestrator = FakeOrchestrator()
 
+            assert client_a.get("/api/pipeline/status").json() == {
+                "running": True,
+                "paused": True,
+                "task_alive": True,
+            }
 
-def test_activate_project_resets_stale_pipeline_manager_status(client, monkeypatch):
-    project_a = client.post("/api/projects", json={"title": "Project A", "genre": "fantasy"}).json()["project"]
-    project_b = client.post("/api/projects", json={"title": "Project B", "genre": "sci-fi"}).json()["project"]
+            assert client_b.post(f"/api/projects/{project_b['id']}/activate").status_code == 200
 
-    assert client.post(f"/api/projects/{project_a['id']}/activate").status_code == 200
-
-    class FakeTask:
-        def done(self):
-            return False
-
-        def cancel(self):
-            return None
-
-    class FakeOrchestrator:
-        def __init__(self):
-            self.status = {"running": True, "paused": True}
-
-        def stop(self):
-            self.status = {"running": False, "paused": False}
-
-    monkeypatch.setattr(studio_api._pipeline_manager, "_task", FakeTask())
-    monkeypatch.setattr(studio_api._pipeline_manager, "_orchestrator", FakeOrchestrator())
-
-    assert client.get("/api/pipeline/status").json() == {
-        "running": True,
-        "paused": True,
-        "task_alive": True,
-    }
-
-    assert client.post(f"/api/projects/{project_b['id']}/activate").status_code == 200
-
-    assert client.get("/api/pipeline/status").json() == {
-        "running": False,
-        "paused": False,
-        "task_alive": False,
-    }
+            assert client_a.get("/api/pipeline/status").json() == {
+                "running": True,
+                "paused": True,
+                "task_alive": True,
+            }
+            assert client_b.get("/api/pipeline/status").json() == {
+                "running": False,
+                "paused": False,
+                "task_alive": False,
+            }
+            assert client_b.get("/api/status").json()["status"] == "idle"
+            assert client_b.get("/status").json()["status"] == "idle"
+        finally:
+            project_a_db.close()

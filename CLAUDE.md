@@ -10,6 +10,13 @@ InkFoundry is a long-form novel generation system with three practical layers:
 - **Studio API** (`Studio/api.py`) — the FastAPI backend, WebSocket endpoint, and effective BFF for the frontend.
 - **Frontend** (`frontend/`) — a React + Vite SPA that mostly wraps backend endpoints into page-level tools.
 
+The product-critical path in the current code is:
+1. create a project with a real brief,
+2. generate an outline from that brief,
+3. generate chapters grounded in outline + continuity context.
+
+Treat this create → outline → chapter chain as the source of truth when judging whether the app is actually working. Peripheral pages may exist even when the core chain is degraded.
+
 `README.md` and `Architecture_V3.md` describe the intended blueprint. When they conflict with the code, trust the **current implementation**.
 
 ## Common commands
@@ -49,6 +56,7 @@ python3 -m pytest
 python3 -m pytest tests/studio/test_api.py -q
 python3 -m pytest tests/studio/test_api.py::test_generate_outline -q
 python3 -m pytest tests/core/test_state_db.py -q
+python3 -m pytest tests/core/test_orchestrator.py tests/agents/test_writer.py tests/studio/test_api.py -q
 python3 -m pytest --cov=Engine --cov-report=term-missing
 ```
 
@@ -79,6 +87,13 @@ Current flow:
 - Chapter is saved back to `StateDB`
 - Events are published to the in-process `EventBus`
 
+Important current behavior:
+
+- Chapter generation now hard-fails when outline is missing.
+- Chapter generation now hard-fails when the requested chapter is outside the outline range.
+- Chapter generation now hard-fails when the current chapter has no chapter summary.
+- The writer path is expected to consume `chapter_summary`, `historical_context`, and `project_brief`; if generated text ignores those inputs, inspect `Engine/core/orchestrator.py` and `Engine/agents/writer.py` together.
+
 If a change affects chapter generation behavior, inspect `orchestrator.py` before changing individual agents.
 
 ### `Studio/api.py` is the real backend entrypoint
@@ -92,6 +107,11 @@ When looking for a route, search `Studio/api.py` first.
 `Engine/core/project_manager.py` manages project metadata in `.projects/catalog.db` and creates one SQLite file per project under `.projects/<project_id>.db`.
 
 Important detail: activating a project via `/api/projects/{project_id}/activate` swaps `app.state.db` to that project's `StateDB`. Project context is therefore **process-global on the backend**, not request-scoped.
+
+Also important in the current implementation:
+
+- Project creation requires a non-empty `summary`; an empty title-only project is no longer considered valid for the main creative flow.
+- The richer project brief (`title / genre / summary / target_chapters`) is expected to live in project-scoped state and feed outline/chapter generation.
 
 ### Frontend project state is separate from backend active project state
 
@@ -129,13 +149,24 @@ Several LLM-facing features fall back to mock, dummy, or heuristic behavior when
 - side story generation
 - imitation generation
 - trend analysis
-- parts of the chapter pipeline when real LLM config is unavailable
+- outline generation when the backend reports `mode: "fallback"`
 
 Do not assume every successful API response came from a real model-backed path.
+
+For the core chain, current semantics are stricter than before:
+
+- outline generation exposes whether it used `model` or `fallback`
+- chapter generation should not silently degrade to a fake success when a real model is unavailable
+- `POST /api/pipeline/run-chapter/{chapter_num}` is expected to fail clearly when no real LLM config is present
 
 ### Config is read from both env and DB-backed state
 
 `.env.example` defines environment variables, but `Studio/api.py` also reads and writes config via `/api/config` and stores it in the database. If config behavior looks inconsistent, inspect both env vars and the `state` table-backed config path.
+
+Two practical consequences:
+
+- malformed stored config can break config-dependent endpoints even when env vars look fine
+- `/status` and `/api/status` now intentionally use the same safe status-computation path and may return `status: "error"` as a sanitized fallback instead of leaking internal exceptions
 
 ### API tests use the app factory with an in-memory DB
 

@@ -2,7 +2,9 @@ import axios from "axios";
 import { useState, useEffect } from "react";
 import { api } from "../api/client";
 import type { SnapshotRecord } from "../api/client";
+import { useAppContext } from "../app-context";
 import { Button } from "../components/ui/button";
+import { getCoreChainReadiness } from "../lib/core-chain-readiness";
 
 interface SnapshotHistoryItem {
   version: number;
@@ -29,11 +31,14 @@ const DEFAULT_CONFIG = {
 type ConfigState = typeof DEFAULT_CONFIG;
 
 export function Settings() {
+  const { currentBook } = useAppContext();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [hasSavedModel, setHasSavedModel] = useState<boolean | null>(null);
+  const [hasOutline, setHasOutline] = useState<boolean | null>(null);
 
   // Snapshots
   const [snapshots, setSnapshots] = useState<SnapshotHistoryItem[]>([]);
@@ -43,7 +48,8 @@ export function Settings() {
   useEffect(() => {
     loadConfig();
     loadSnapshots();
-  }, []);
+    void loadOutlineState();
+  }, [currentBook?.id]);
 
   const loadConfig = async () => {
     setLoading(true);
@@ -62,8 +68,10 @@ export function Settings() {
         max_retries: res.data.max_retries || 3,
         pipeline_parallel: res.data.pipeline_parallel || false,
       });
+      setHasSavedModel(Boolean(res.data.llm_api_key_masked || res.data.llm_api_key));
     } catch {
       console.error("Failed to load config");
+      setHasSavedModel(null);
     } finally {
       setLoading(false);
     }
@@ -85,6 +93,15 @@ export function Settings() {
     } catch {
       console.error("Failed to load snapshots");
       setSnapshotError("版本历史加载失败，请稍后重试");
+    }
+  };
+
+  const loadOutlineState = async () => {
+    try {
+      const res = await api.getOutline();
+      setHasOutline(Boolean(res.data.outline));
+    } catch {
+      setHasOutline(false);
     }
   };
 
@@ -159,6 +176,12 @@ export function Settings() {
     return <div className="flex items-center justify-center h-full"><p className="text-gray-400">加载配置中...</p></div>;
   }
 
+  const chainReadiness = getCoreChainReadiness({
+    hasProjectSummary: Boolean(currentBook?.summary.trim()),
+    hasOutline: Boolean(hasOutline),
+    hasRealModel: hasSavedModel,
+  });
+
   return (
     <div className="h-full overflow-auto p-6">
       {/* Toolbar */}
@@ -166,6 +189,13 @@ export function Settings() {
         <div>
           <h2 className="text-lg font-semibold">当前项目设置</h2>
           <p className="text-sm text-gray-400 mt-1">管理当前项目的模型、流水线和版本快照配置</p>
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-500">
+            <span className={`rounded-full px-2.5 py-1 ${chainReadiness.badgeClassName}`}>
+              链路状态：{chainReadiness.label}
+            </span>
+            <span>{chainReadiness.description}</span>
+            <span>下一步：{chainReadiness.nextAction}</span>
+          </div>
         </div>
         <div className="flex items-center gap-3">
           {saved && (
@@ -192,7 +222,7 @@ export function Settings() {
                 placeholder="sk-..."
               />
               <p className="text-xs text-gray-400 mt-1">
-                用于调用 LLM API 的密钥
+                用于调用 LLM API 的密钥。章节生成要求这里存在真实模型配置。
               </p>
             </div>
             <div>
