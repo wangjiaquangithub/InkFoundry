@@ -395,6 +395,7 @@ class PipelineManager:
 
         orchestrator: Optional[Any] = None
         try:
+            _require_real_chapter_model(db)
             orchestrator = self._create_orchestrator(db)
             runtime.db = db
             runtime.orchestrator = orchestrator
@@ -652,6 +653,75 @@ def _normalize_target_chapters(value: Optional[int], default: int = 100) -> int:
     if value < 1 or value > 1000:
         raise HTTPException(status_code=422, detail="target_chapters must be between 1 and 1000")
     return value
+
+
+async def _generate_outline_for_project(db: StateDB, body: Optional[OutlineGenerate] = None) -> Dict[str, Any]:
+    from Engine.agents.outline import OutlineAgent
+
+    config = _get_engine_config_or_http(db)
+    project_brief = _get_project_brief(db)
+    source = body or OutlineGenerate()
+    has_stored_brief = bool(str(project_brief.get("summary") or "").strip())
+
+    genre = (
+        project_brief.get("genre")
+        if has_stored_brief and project_brief.get("genre")
+        else source.genre
+    ) or project_brief.get("genre") or source.genre or "xuanhuan"
+    title = (
+        project_brief.get("title")
+        if has_stored_brief and project_brief.get("title")
+        else source.title
+    ) or project_brief.get("title") or source.title or "Untitled"
+    summary = (
+        project_brief.get("summary")
+        if has_stored_brief and project_brief.get("summary")
+        else source.summary
+    )
+    total_chapters_source = (
+        project_brief.get("target_chapters")
+        if has_stored_brief and project_brief.get("target_chapters") is not None
+        else source.total_chapters
+    )
+
+    genre = str(genre or "xuanhuan").strip() or "xuanhuan"
+    title = str(title or "Untitled").strip() or "Untitled"
+    summary = str(summary or "").strip()
+    total_chapters = _normalize_target_chapters(
+        total_chapters_source if total_chapters_source is not None else project_brief.get("target_chapters"),
+        default=100,
+    )
+
+    if not summary:
+        raise HTTPException(status_code=422, detail="Project summary is required before generating an outline")
+
+    agent = OutlineAgent()
+    if config and config.llm.api_key:
+        agent = OutlineAgent(
+            model_name=config.role_models.get("navigator", config.llm.default_model),
+            api_key=config.llm.api_key,
+            base_url=config.llm.base_url,
+        )
+        outline = await agent.arun(
+            genre=genre,
+            title=title,
+            summary=summary,
+            total_chapters=total_chapters,
+        )
+    else:
+        outline = agent.run(
+            genre=genre,
+            title=title,
+            summary=summary,
+            total_chapters=total_chapters,
+        )
+
+    db.save_outline(outline)
+    return {
+        "message": "Outline generated",
+        "outline": outline.model_dump(),
+        "mode": "model" if config and config.llm.api_key else "fallback",
+    }
 
 
 def _get_project_brief(db: StateDB) -> Dict[str, Any]:
@@ -1287,72 +1357,11 @@ def create_app(
 
     @app.post("/api/outlines/generate")
     async def generate_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
-        from Engine.agents.outline import OutlineAgent
-
-        config = _get_engine_config_or_http(db)
-        project_brief = _get_project_brief(db)
-        genre = (body.genre or project_brief.get("genre") or "xuanhuan").strip() or "xuanhuan"
-        title = (body.title or project_brief.get("title") or "Untitled").strip() or "Untitled"
-        summary = (body.summary if body.summary is not None else project_brief.get("summary") or "").strip()
-        total_chapters = _normalize_target_chapters(
-            body.total_chapters if body.total_chapters is not None else project_brief.get("target_chapters"),
-            default=100,
-        )
-
-        if not summary:
-            raise HTTPException(status_code=422, detail="Project summary is required before generating an outline")
-
-        agent = OutlineAgent()
-        if config and config.llm.api_key:
-            agent = OutlineAgent(
-                model_name=config.role_models.get("navigator", config.llm.default_model),
-                api_key=config.llm.api_key,
-                base_url=config.llm.base_url,
-            )
-            outline = await agent.arun(
-                genre=genre,
-                title=title,
-                summary=summary,
-                total_chapters=total_chapters,
-            )
-        else:
-            outline = agent.run(
-                genre=genre,
-                title=title,
-                summary=summary,
-                total_chapters=total_chapters,
-            )
-        db.save_outline(outline)
-        return {
-            "message": "Outline generated",
-            "outline": outline.model_dump(),
-            "mode": "model" if config and config.llm.api_key else "fallback",
-        }
+        return await _generate_outline_for_project(db, body)
 
     @app.put("/api/outlines")
-    def update_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
-        from Engine.agents.outline import OutlineAgent
-
-        project_brief = _get_project_brief(db)
-        genre = (body.genre or project_brief.get("genre") or "xuanhuan").strip() or "xuanhuan"
-        title = (body.title or project_brief.get("title") or "Untitled").strip() or "Untitled"
-        summary = (body.summary if body.summary is not None else project_brief.get("summary") or "").strip()
-        total_chapters = _normalize_target_chapters(
-            body.total_chapters if body.total_chapters is not None else project_brief.get("target_chapters"),
-            default=100,
-        )
-        if not summary:
-            raise HTTPException(status_code=422, detail="Project summary is required before generating an outline")
-
-        agent = OutlineAgent()
-        outline = agent.run(
-            genre=genre,
-            title=title,
-            summary=summary,
-            total_chapters=total_chapters,
-        )
-        db.save_outline(outline)
-        return {"message": "Outline updated", "outline": outline.model_dump(), "mode": "fallback"}
+    async def update_outline(body: OutlineGenerate, db: StateDB = Depends(_get_db)) -> Dict[str, Any]:
+        return await _generate_outline_for_project(db, body)
 
     # --- Character Profiles ---
     @app.get("/api/profiles")

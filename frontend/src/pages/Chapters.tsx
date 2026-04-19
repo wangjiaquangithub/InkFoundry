@@ -209,8 +209,8 @@ export function Chapters() {
       ? Math.max(...chapters.map((c) => c.chapter_num)) + 1
       : 1;
 
-    if (!chainReadiness.canGenerateChapter) {
-      setPageError(chainReadiness.description);
+    if (chapterGenerationBlockReason) {
+      setPageError(chapterGenerationBlockReason);
       return;
     }
 
@@ -271,14 +271,24 @@ export function Chapters() {
   }
 
   const nextChapterNum = chapters.length > 0 ? Math.max(...chapters.map((c) => c.chapter_num)) + 1 : 1;
-  const outlineSummary = outline?.chapter_summaries?.find((ch) => ch.chapter_num === nextChapterNum)?.summary ?? "";
+  const outlineSummary = outline?.chapter_summaries?.find((ch) => ch.chapter_num === nextChapterNum)?.summary?.trim() ?? "";
+  const nextChapterWithinOutline = outline ? nextChapterNum <= outline.total_chapters : true;
   const chainReadiness = getCoreChainReadiness({
     hasProjectSummary: Boolean(currentBook?.summary.trim()),
     hasOutline: outline ? true : hasOutline,
     hasRealModel: statusSnapshot?.core_chain_readiness?.real_model_ready ?? null,
     facts: statusSnapshot?.core_chain_readiness,
   });
-  const canGenerate = chainReadiness.canGenerateChapter && !generating;
+  const chapterGenerationBlockReason = generating
+    ? "正在生成章节"
+    : !chainReadiness.canGenerateChapter
+      ? chainReadiness.description
+      : !nextChapterWithinOutline
+        ? `大纲只规划到第${outline?.total_chapters ?? 0}章，当前不能继续生成。`
+        : !outlineSummary
+          ? `大纲中缺少第${nextChapterNum}章概要，当前不能生成章节。`
+          : null;
+  const canGenerate = chapterGenerationBlockReason === null;
 
   return (
     <div className="flex h-full">
@@ -413,7 +423,7 @@ export function Chapters() {
                       : "状态待确认"}
               </span>
               <span>大纲：{outline ? `已加载（目标 ${outline.total_chapters} 章）` : "缺失"}</span>
-              <span>下一步：{chainReadiness.nextAction}</span>
+              <span>下一步：{chapterGenerationBlockReason ?? chainReadiness.nextAction}</span>
               {outlineSummary ? <span>下一章概要：{outlineSummary}</span> : null}
               {statusError ? <span className="text-red-600">状态检查失败：{statusError}</span> : null}
             </div>
@@ -431,7 +441,7 @@ export function Chapters() {
               size="sm"
               onClick={handleGenerate}
               disabled={!canGenerate}
-              title={!canGenerate ? chainReadiness.nextAction : undefined}
+              title={!canGenerate ? chapterGenerationBlockReason ?? chainReadiness.nextAction : undefined}
             >
               {generating ? "生成中..." : "生成下一章"}
             </Button>
@@ -490,13 +500,13 @@ export function Chapters() {
                     {chainReadiness.label}
                   </span>
                 </div>
-                <p className="text-sm text-gray-400 mb-2">{chainReadiness.description}</p>
+                <p className="text-sm text-gray-400 mb-2">{chapterGenerationBlockReason ?? chainReadiness.description}</p>
                 <p className="text-sm text-gray-400 mb-4">
                   {hasOutline === null
                     ? "当前无法确认大纲状态，请稍后重试或重新检查设置。"
-                    : outlineSummary && chainReadiness.canGenerateChapter
+                    : outlineSummary && canGenerate
                       ? `下一章将基于概要：${outlineSummary}`
-                      : `下一步：${chainReadiness.nextAction}`}
+                      : `下一步：${chapterGenerationBlockReason ?? chainReadiness.nextAction}`}
                 </p>
                 <div className="flex flex-wrap items-center justify-center gap-2">
                   <Button size="lg" onClick={handleGenerate} disabled={!canGenerate}>

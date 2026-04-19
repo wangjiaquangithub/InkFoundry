@@ -163,6 +163,55 @@ def test_generate_outline_uses_stored_project_brief(client):
     assert data["outline"]["total_chapters"] == 6
 
 
+def test_generate_outline_ignores_request_brief_when_project_brief_exists(client):
+    project = client.post("/api/projects", json={
+        "title": "Canonical Brief Novel",
+        "genre": "xuanhuan",
+        "summary": "以项目内保存的简介为准。",
+        "target_chapters": 7,
+    }).json()["project"]
+    activate_response = client.post(f"/api/projects/{project['id']}/activate")
+    assert activate_response.status_code == 200
+
+    response = client.post("/api/outlines/generate", json={
+        "title": "Wrong Title",
+        "genre": "urban",
+        "summary": "这是错误的请求体简介。",
+        "total_chapters": 3,
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["outline"]["title"] == "Canonical Brief Novel"
+    assert data["outline"]["summary"] == "以项目内保存的简介为准。"
+    assert data["outline"]["total_chapters"] == 7
+
+
+def test_update_outline_uses_same_generation_semantics_as_generate(client):
+    project = client.post("/api/projects", json={
+        "title": "Update Outline Novel",
+        "genre": "xuanhuan",
+        "summary": "更新接口也应读取持久化项目简介。",
+        "target_chapters": 4,
+    }).json()["project"]
+    activate_response = client.post(f"/api/projects/{project['id']}/activate")
+    assert activate_response.status_code == 200
+
+    response = client.put("/api/outlines", json={
+        "title": "Wrong Update Title",
+        "summary": "Wrong update summary",
+        "total_chapters": 2,
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["message"] == "Outline generated"
+    assert data["mode"] == "fallback"
+    assert data["outline"]["title"] == "Update Outline Novel"
+    assert data["outline"]["summary"] == "更新接口也应读取持久化项目简介。"
+    assert data["outline"]["total_chapters"] == 4
+
+
 def test_get_outline(client):
     client.post("/api/outlines/generate", json={
         "title": "Test",
@@ -708,11 +757,24 @@ def test_run_batch_via_api(client):
         "start_chapter": 1,
         "end_chapter": 3,
     })
-    assert response.status_code == 200
-    data = response.json()
-    assert "1" in data["results"]
-    assert "2" in data["results"]
-    assert "3" in data["results"]
+    assert response.status_code == 422
+    assert response.json()["detail"] == "A real LLM configuration is required before generating chapters"
+
+
+def test_run_batch_via_api_requires_real_model(client):
+    client.post("/api/outlines/generate", json={
+        "title": "Strict Batch Test",
+        "summary": "A clear summary",
+        "total_chapters": 5,
+    })
+
+    response = client.post("/api/pipeline/run-batch", json={
+        "start_chapter": 1,
+        "end_chapter": 2,
+    })
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "A real LLM configuration is required before generating chapters"
 
 
 def test_run_batch_via_api_returns_conflict_when_pipeline_is_busy(client, pipeline_manager):
@@ -738,6 +800,11 @@ def test_run_batch_via_api_returns_conflict_when_pipeline_is_busy(client, pipeli
 
 
 def test_run_batch_via_api_returns_validation_error_on_value_error(client, pipeline_manager, monkeypatch):
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
     class FakeOrchestrator:
         async def run_batch(self, start: int, end: int):
             raise ValueError("start_chapter must be less than or equal to end_chapter")
@@ -759,6 +826,11 @@ def test_run_batch_via_api_returns_validation_error_on_value_error(client, pipel
 
 
 def test_run_batch_via_api_propagates_http_exception(client, pipeline_manager, monkeypatch):
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
     class FakeOrchestrator:
         async def run_batch(self, start: int, end: int):
             raise studio_api.HTTPException(status_code=422, detail="Invalid batch range")
@@ -780,6 +852,12 @@ def test_run_batch_via_api_propagates_http_exception(client, pipeline_manager, m
 
 
 def test_run_batch_via_api_hides_internal_error_details(client, pipeline_manager, monkeypatch, caplog):
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
     class FakeOrchestrator:
         async def run_batch(self, start: int, end: int):
             raise RuntimeError("upstream provider timeout: api-key=secret")
@@ -803,6 +881,12 @@ def test_run_batch_via_api_hides_internal_error_details(client, pipeline_manager
 
 
 def test_run_batch_via_api_rejects_concurrent_sync_request(client, pipeline_manager, monkeypatch):
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
     entered = threading.Event()
     release = threading.Event()
 
@@ -848,6 +932,12 @@ def test_run_batch_via_api_rejects_concurrent_sync_request(client, pipeline_mana
 
 
 def test_run_batch_via_api_releases_sync_lock_when_orchestrator_creation_fails(client, pipeline_manager, monkeypatch):
+    client.post("/api/config", json={
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "default_model": "qwen3.6-plus",
+    })
+
     calls = {"count": 0}
 
     class SuccessOrchestrator:
