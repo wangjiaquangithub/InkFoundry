@@ -525,8 +525,23 @@ def _raise_inactive_project_selection(request: Request) -> None:
     )
 
 
-def _open_project_db(db_path: str) -> Iterator[StateDB]:
-    db = StateDB(db_path)
+def _attach_project_identity(db: StateDB, info: ProjectInfo) -> None:
+    setattr(db, "_project_id", info.id)
+    setattr(db, "_project_title", info.title)
+    setattr(db, "_project_genre", info.genre)
+
+
+def _project_identity_from_db(db: Optional[StateDB]) -> Dict[str, str]:
+    return {
+        "id": str(getattr(db, "_project_id", "novel-001") or "novel-001"),
+        "title": str(getattr(db, "_project_title", "Untitled Novel") or "Untitled Novel"),
+        "genre": str(getattr(db, "_project_genre", "fiction") or "fiction"),
+    }
+
+
+def _open_project_db(info: ProjectInfo) -> Iterator[StateDB]:
+    db = StateDB(info.db_path)
+    _attach_project_identity(db, info)
     try:
         yield db
     finally:
@@ -546,7 +561,7 @@ def _get_db(request: Request, response: Response) -> Iterator[StateDB]:
         _clear_active_project_cookie(request, response)
         _raise_inactive_project_selection(request)
 
-    yield from _open_project_db(info.db_path)
+    yield from _open_project_db(info)
 
 
 def _get_project_manager(request: Request) -> ProjectManager:
@@ -768,11 +783,12 @@ def _safe_core_chain_readiness(db: StateDB) -> Dict[str, bool]:
 
 
 
-def _fallback_project_status() -> Dict[str, Any]:
+def _fallback_project_status(db: Optional[StateDB] = None) -> Dict[str, Any]:
+    identity = _project_identity_from_db(db)
     return {
-        "id": "novel-001",
-        "title": "Untitled Novel",
-        "genre": "fiction",
+        "id": identity["id"],
+        "title": identity["title"],
+        "genre": identity["genre"],
         "current_chapter": 1,
         "total_chapters": 10,
         "status": "error",
@@ -813,11 +829,12 @@ def _derive_project_status(completed: int, total_chapters: int, pipeline_status:
 
 
 def _build_project_status(db: StateDB, pipeline_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    identity = _project_identity_from_db(db)
     brief = _get_project_brief(db)
     config = _load_stored_config(db)
     readiness = _safe_core_chain_readiness(db)
-    title = brief.get("title") or config.get("novel_title") or "Untitled Novel"
-    genre = brief.get("genre") or config.get("genre") or "fiction"
+    title = brief.get("title") or config.get("novel_title") or identity["title"]
+    genre = brief.get("genre") or config.get("genre") or identity["genre"]
 
     chapters = [
         {
@@ -844,7 +861,7 @@ def _build_project_status(db: StateDB, pipeline_status: Optional[Dict[str, Any]]
     resolved_pipeline_status = pipeline_status if pipeline_status is not None else {"running": False, "paused": False, "task_alive": False}
 
     return {
-        "id": "novel-001",
+        "id": identity["id"],
         "title": title,
         "genre": genre,
         "current_chapter": _derive_current_chapter(chapters, total_chapters),
@@ -859,7 +876,7 @@ def _safe_project_status(db: StateDB, pipeline_status: Optional[Dict[str, Any]] 
         return _build_project_status(db, pipeline_status=pipeline_status)
     except Exception:
         logger.exception("Failed to compute project status")
-        return _fallback_project_status()
+        return _fallback_project_status(db)
 
 
 def _get_pipeline_manager(request: Request) -> PipelineManager:

@@ -31,7 +31,9 @@ export function Projects() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [pageNotice, setPageNotice] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const [activatingProjectId, setActivatingProjectId] = useState<string | null>(null);
   const isMountedRef = useRef(true);
+  const activationRequestIdRef = useRef(0);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -86,11 +88,31 @@ export function Projects() {
 
   const activateProject = async (project: Project) => {
     if (isRestoringBook) {
-      return;
+      return null;
     }
 
-    await api.activateProject(project.id);
-    setCurrentBook(normalizeBookInfo(project));
+    const requestId = ++activationRequestIdRef.current;
+    setActivatingProjectId(project.id);
+
+    try {
+      await api.activateProject(project.id);
+      const activeProjectRes = await api.getActiveProject();
+      if (requestId !== activationRequestIdRef.current) {
+        return null;
+      }
+      const resolvedProject = activeProjectRes.data.project ?? project;
+      setCurrentBook(normalizeBookInfo(resolvedProject));
+      return resolvedProject;
+    } catch {
+      if (requestId !== activationRequestIdRef.current) {
+        return null;
+      }
+      throw new Error("activate project failed");
+    } finally {
+      if (requestId === activationRequestIdRef.current) {
+        setActivatingProjectId(null);
+      }
+    }
   };
 
   const handleCreate = async () => {
@@ -111,8 +133,11 @@ export function Projects() {
         target_chapters: targetChapters,
       });
       const project = createRes.data.project;
-      const entryAction = getProjectEntryAction(project);
-      await activateProject(project);
+      const activatedProject = await activateProject(project);
+      if (!activatedProject) {
+        return;
+      }
+      const entryAction = getProjectEntryAction(activatedProject);
       setShowCreate(false);
       setNewTitle("");
       setNewGenre("xuanhuan");
@@ -132,8 +157,11 @@ export function Projects() {
       if (!project) {
         throw new Error("Project not found");
       }
-      const entryAction = getProjectEntryAction(project);
-      await activateProject(project);
+      const activatedProject = await activateProject(project);
+      if (!activatedProject) {
+        return;
+      }
+      const entryAction = getProjectEntryAction(activatedProject);
       navigate(entryAction.route);
     } catch {
       setPageNotice("切换项目失败，请重试。");
@@ -231,9 +259,13 @@ export function Projects() {
                     size="sm"
                     className="flex-1"
                     onClick={() => handleActivate(p.id)}
-                    disabled={isRestoringBook}
+                    disabled={isRestoringBook || activatingProjectId !== null}
                   >
-                    {isRestoringBook ? "恢复中..." : entryAction.label}
+                    {isRestoringBook
+                      ? "恢复中..."
+                      : activatingProjectId === p.id
+                        ? "切换中..."
+                        : entryAction.label}
                   </Button>
                   <Button
                     variant="outline"

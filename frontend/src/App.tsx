@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import axios from "axios";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AppContext,
   loadStoredCurrentBook,
@@ -8,7 +9,7 @@ import {
   useAppContext,
   type BookInfo,
 } from "./app-context";
-import { api } from "./api/client";
+import { api, type ProjectRecord } from "./api/client";
 import { Projects } from "./pages/Projects";
 import { Outline } from "./pages/Outline";
 import { Chapters } from "./pages/Chapters";
@@ -136,36 +137,80 @@ function App() {
   const [currentBook, setCurrentBookState] = useState<BookInfo | null>(() => loadStoredCurrentBook());
   const [isRestoringBook, setIsRestoringBook] = useState(true);
   const [restoreIssue, setRestoreIssue] = useState<string | null>(null);
+  const syncRequestIdRef = useRef(0);
+  const currentBookRef = useRef<BookInfo | null>(currentBook);
+  const lastReconcileAtRef = useRef(0);
+
+  const booksEqual = useCallback((left: BookInfo | null, right: BookInfo | null) => {
+    if (left === right) {
+      return true;
+    }
+    if (!left || !right) {
+      return false;
+    }
+    return left.id === right.id
+      && left.title === right.title
+      && left.genre === right.genre
+      && left.summary === right.summary
+      && left.targetChapters === right.targetChapters;
+  }, []);
 
   const setCurrentBook = useCallback((book: BookInfo | null) => {
-    setCurrentBookState(book);
+    syncRequestIdRef.current += 1;
+    currentBookRef.current = book;
+    setCurrentBookState((prev) => (booksEqual(prev, book) ? prev : book));
     saveCurrentBook(book);
     if (book) {
       setRestoreIssue(null);
     }
+  }, [booksEqual]);
+
+  const normalizeActiveProject = useCallback((project: ProjectRecord | null): BookInfo | null => {
+    return project ? normalizeBookInfo(project) : null;
   }, []);
+
+  const syncProjectContext = useCallback(async (options?: { preserveCurrentBookOnFailure?: boolean }) => {
+    const storedBook = loadStoredCurrentBook();
+    const preserveCurrentBookOnFailure = options?.preserveCurrentBookOnFailure ?? false;
+    const requestId = ++syncRequestIdRef.current;
+
+    try {
+      const res = await api.getActiveProject();
+      if (requestId !== syncRequestIdRef.current) {
+        return null;
+      }
+      const project = normalizeActiveProject(res.data.project);
+      setCurrentBook(project);
+      if (!project && storedBook) {
+        setRestoreIssue("上次选中的项目已失效或被删除，请重新选择一个项目。");
+      }
+      return project;
+    } catch (error: unknown) {
+      if (requestId !== syncRequestIdRef.current) {
+        return null;
+      }
+      if (axios.isAxiosError(error) && error.response?.status === 409) {
+        setCurrentBook(null);
+        setRestoreIssue("当前项目上下文已失效，请重新选择一个项目。");
+        return null;
+      }
+
+      if (!preserveCurrentBookOnFailure) {
+        setCurrentBook(null);
+      }
+      if (storedBook) {
+        setRestoreIssue("项目上下文恢复失败，请重新确认项目后继续。");
+      }
+      return preserveCurrentBookOnFailure ? currentBookRef.current : null;
+    }
+  }, [normalizeActiveProject, setCurrentBook]);
 
   useEffect(() => {
     let cancelled = false;
 
     const restoreProjectContext = async () => {
-      const storedBook = loadStoredCurrentBook();
       try {
-        const res = await api.getActiveProject();
-        const project = res.data.project ? normalizeBookInfo(res.data.project) : null;
-        if (!cancelled) {
-          setCurrentBook(project);
-          if (!project && storedBook) {
-            setRestoreIssue("上次选中的项目已失效或被删除，请重新选择一个项目。");
-          }
-        }
-      } catch {
-        if (!cancelled) {
-          setCurrentBook(null);
-          if (storedBook) {
-            setRestoreIssue("项目上下文恢复失败，请重新确认项目后继续。");
-          }
-        }
+        await syncProjectContext();
       } finally {
         if (!cancelled) {
           setIsRestoringBook(false);
@@ -178,7 +223,46 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [setCurrentBook]);
+  }, [syncProjectContext]);
+
+  useEffect(() => {
+    if (isRestoringBook || typeof window === "undefined") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const reconcile = async () => {
+      const now = Date.now();
+      if (now - lastReconcileAtRef.current < 300) {
+        return;
+      }
+      lastReconcileAtRef.current = now;
+      await syncProjectContext({ preserveCurrentBookOnFailure: true });
+      if (cancelled) {
+        return;
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void reconcile();
+      }
+    };
+
+    const handleFocus = () => {
+      void reconcile();
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isRestoringBook, syncProjectContext]);
 
   return (
     <AppContext.Provider

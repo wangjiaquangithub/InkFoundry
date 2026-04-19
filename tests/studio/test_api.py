@@ -1257,7 +1257,11 @@ def test_active_project_payload_reuses_same_core_chain_readiness_as_status(clien
 
     assert status_response.status_code == 200
     assert active_project_response.status_code == 200
-    readiness = status_response.json()["core_chain_readiness"]
+    status_payload = status_response.json()
+    readiness = status_payload["core_chain_readiness"]
+    assert status_payload["id"] == project["id"]
+    assert status_payload["title"] == project["title"]
+    assert status_payload["genre"] == project["genre"]
     assert readiness == {
         "project_brief_ready": True,
         "outline_ready": True,
@@ -1322,6 +1326,39 @@ def test_status_and_api_status_share_same_fallback_for_malformed_project_brief(c
     assert api_status_response.status_code == 200
     assert status_response.json() == api_status_response.json()
     assert api_status_response.json()["status"] == "error"
+
+
+def test_active_project_status_fallback_preserves_project_identity(client):
+    project = client.post("/api/projects", json={
+        "title": "Broken Brief Project",
+        "genre": "fantasy",
+        "summary": "Ready summary",
+        "target_chapters": 5,
+    }).json()["project"]
+
+    assert client.post(f"/api/projects/{project['id']}/activate").status_code == 200
+    project_info = client.app.state.project_manager.get_project(project["id"])
+    assert project_info is not None
+    project_db = StateDB(project_info.db_path)
+    try:
+        project_db.conn.execute(
+            "INSERT OR REPLACE INTO state (key, data, version) VALUES (?, ?, 1)",
+            ("project_brief", '{"title": "Broken Brief"'),
+        )
+        project_db.conn.commit()
+    finally:
+        project_db.close()
+
+    api_status_response = client.get("/api/status")
+    status_response = client.get("/status")
+
+    assert api_status_response.status_code == 200
+    assert status_response.status_code == 200
+    assert status_response.json() == api_status_response.json()
+    assert api_status_response.json()["status"] == "error"
+    assert api_status_response.json()["id"] == project["id"]
+    assert api_status_response.json()["title"] == project["title"]
+    assert api_status_response.json()["genre"] == project["genre"]
 
 
 def test_api_status_clamps_current_chapter_when_all_chapters_completed(client):
